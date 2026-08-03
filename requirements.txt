@@ -1,0 +1,5 @@
+httpx>=0.27,<1.0
+google-cloud-storage>=2.18,<4.0
+# zoneinfo necesita la base de datos de zonas horarias en Windows y en imagenes
+# slim de Linux que no traen tzdata del sistema.
+tzdata>=2024.1

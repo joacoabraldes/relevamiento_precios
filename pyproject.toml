@@ -1,0 +1,20 @@
+[project]
+name = "sepa-downloader"
+version = "1.0.0"
+description = "Descarga diaria de los ZIP de precios SEPA y archivado crudo en GCS"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "google-cloud-storage>=2.18,<4.0",
+    "tzdata>=2024.1",
+]
+
+[project.scripts]
+sepa-downloader = "sepa_downloader:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["sepa_downloader"]
