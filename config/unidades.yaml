@@ -1,0 +1,118 @@
+# Normalizacion de unidades de medida de SEPA.
+#
+# El Anexo II de la Res. 678/2020 especifica un conjunto chico de unidades
+# (l, ml, kg, gr, m, unidad), pero los comercios informan variantes libres.
+# Medido sobre datos reales del 2026-08-01 aparecen al menos 15 codigos
+# distintos: UNI, EA, KG, L, KGM, GR, ML, CC, UN, M, G, GRM, CM3, M2, LT.
+#
+# Cada entrada define:
+#   canonica: el codigo normalizado que queda en `unidad_presentacion`
+#   base:     la unidad en la que se expresa `cantidad_base` (kg | l | un | m | m2)
+#   factor:   cuanto vale 1 unidad de esta medida expresada en la unidad base
+#
+# El lookup normaliza a mayusculas, recorta espacios y saca puntos, asi que
+# "kg", "KG", "Kg." y " kg " caen todos en la misma entrada.
+#
+# Buena parte de los codigos raros resultaron ser UN/CEFACT Rec. 20 (KGM, GRM,
+# LTR, MTR, CMQ, DMQ, CMT, EA): varios comercios exportan desde ERPs que usan
+# ese estandar en vez del castellano del Anexo. El resto son abreviaturas
+# libres (CU, HJS, CJ, PAR), verificadas mirando las descripciones reales.
+#
+# Regla: si un codigo no se puede interpretar sin adivinar, NO se mapea. Queda
+# con cantidad_base nula y se cuenta como "unidad desconocida" en el resumen.
+# Es preferible un hueco visible a una conversion inventada.
+
+unidades:
+
+  # ---- peso (base: kg) ----
+  KG:      {canonica: kg,  base: kg, factor: 1.0}
+  KGM:     {canonica: kg,  base: kg, factor: 1.0}
+  KGS:     {canonica: kg,  base: kg, factor: 1.0}
+  KILO:    {canonica: kg,  base: kg, factor: 1.0}
+  KILOS:   {canonica: kg,  base: kg, factor: 1.0}
+  KILOGRAMO: {canonica: kg, base: kg, factor: 1.0}
+  G:       {canonica: g,   base: kg, factor: 0.001}
+  GR:      {canonica: g,   base: kg, factor: 0.001}
+  GRS:     {canonica: g,   base: kg, factor: 0.001}
+  GRM:     {canonica: g,   base: kg, factor: 0.001}
+  GRAMO:   {canonica: g,   base: kg, factor: 0.001}
+  GRAMOS:  {canonica: g,   base: kg, factor: 0.001}
+  MG:      {canonica: mg,  base: kg, factor: 0.000001}
+  # UN/CEFACT Rec. 20
+  KGR:     {canonica: kg,  base: kg, factor: 1.0}       # visto en "KIWI, 1 KGR"
+  MGM:     {canonica: mg,  base: kg, factor: 0.000001}
+
+  # ---- volumen (base: l) ----
+  L:       {canonica: l,   base: l,  factor: 1.0}
+  LT:      {canonica: l,   base: l,  factor: 1.0}
+  LTS:     {canonica: l,   base: l,  factor: 1.0}
+  LITRO:   {canonica: l,   base: l,  factor: 1.0}
+  LITROS:  {canonica: l,   base: l,  factor: 1.0}
+  ML:      {canonica: ml,  base: l,  factor: 0.001}
+  MLS:     {canonica: ml,  base: l,  factor: 0.001}
+  CC:      {canonica: cm3, base: l,  factor: 0.001}   # 1 cm3 = 1 ml
+  CM3:     {canonica: cm3, base: l,  factor: 0.001}
+  M3:      {canonica: m3,  base: l,  factor: 1000.0}
+  HL:      {canonica: hl,  base: l,  factor: 100.0}
+  # UN/CEFACT Rec. 20: CMQ = cm3, DMQ = dm3 (= 1 litro), MTQ = m3
+  LTR:     {canonica: l,   base: l,  factor: 1.0}
+  MLT:     {canonica: ml,  base: l,  factor: 0.001}
+  MI:      {canonica: ml,  base: l,  factor: 0.001}     # visto en "BOT-200-MI"
+  CLT:     {canonica: cl,  base: l,  factor: 0.01}
+  CL:      {canonica: cl,  base: l,  factor: 0.01}
+  CMQ:     {canonica: cm3, base: l,  factor: 0.001}     # visto en "BOT 750 CMQ"
+  DMQ:     {canonica: dm3, base: l,  factor: 1.0}       # confirmado: 5,2 DMQ con u_ref=LTR
+  DM3:     {canonica: dm3, base: l,  factor: 1.0}
+  MTQ:     {canonica: m3,  base: l,  factor: 1000.0}
+
+  # ---- longitud (base: m) ----
+  M:       {canonica: m,   base: m,  factor: 1.0}
+  MT:      {canonica: m,   base: m,  factor: 1.0}
+  MTS:     {canonica: m,   base: m,  factor: 1.0}
+  METRO:   {canonica: m,   base: m,  factor: 1.0}
+  DM:      {canonica: dm,  base: m,  factor: 0.1}
+  CM:      {canonica: cm,  base: m,  factor: 0.01}
+  MM:      {canonica: mm,  base: m,  factor: 0.001}
+  # UN/CEFACT Rec. 20
+  MTR:     {canonica: m,   base: m,  factor: 1.0}
+  CMT:     {canonica: cm,  base: m,  factor: 0.01}      # visto en "COLLAR 55 CMT" con u_ref=M
+  DMT:     {canonica: dm,  base: m,  factor: 0.1}
+  MMT:     {canonica: mm,  base: m,  factor: 0.001}
+  METROS:  {canonica: m,   base: m,  factor: 1.0}
+
+  # ---- superficie (base: m2) ----
+  M2:      {canonica: m2,  base: m2, factor: 1.0}
+  MTK:     {canonica: m2,  base: m2, factor: 1.0}       # UN/CEFACT Rec. 20
+
+  # ---- unidad / conteo (base: un) ----
+  # EA = "each"; varios comercios usan el codigo en ingles.
+  UN:      {canonica: un,  base: un, factor: 1.0}
+  UNI:     {canonica: un,  base: un, factor: 1.0}
+  UND:     {canonica: un,  base: un, factor: 1.0}
+  UNID:    {canonica: un,  base: un, factor: 1.0}
+  UNIDAD:  {canonica: un,  base: un, factor: 1.0}
+  UNIDADES: {canonica: un, base: un, factor: 1.0}
+  EA:      {canonica: un,  base: un, factor: 1.0}
+  U:       {canonica: un,  base: un, factor: 1.0}
+  PAQ:     {canonica: un,  base: un, factor: 1.0}
+  PAQUETE: {canonica: un,  base: un, factor: 1.0}
+  PACK:    {canonica: un,  base: un, factor: 1.0}
+  DOC:     {canonica: un,  base: un, factor: 12.0}
+  DOCENA:  {canonica: un,  base: un, factor: 12.0}
+  UNIDA:   {canonica: un,  base: un, factor: 1.0}       # "UNIDAD" truncado
+  UD:      {canonica: un,  base: un, factor: 1.0}       # 458k filas/dia en comercio-15
+  UDS:     {canonica: un,  base: un, factor: 1.0}
+  PCK:     {canonica: un,  base: un, factor: 1.0}       # pack; se vende como 1 presentacion
+  CU:      {canonica: un,  base: un, factor: 1.0}       # visto en "24 CU" de panales
+  PC:      {canonica: un,  base: un, factor: 1.0}       # piece
+  H87:     {canonica: un,  base: un, factor: 1.0}       # UN/CEFACT: piece
+  PIE:     {canonica: un,  base: un, factor: 1.0}       # "pieza", no el pie ingles
+  CJ:      {canonica: un,  base: un, factor: 1.0}       # caja
+  CAJA:    {canonica: un,  base: un, factor: 1.0}
+  HJS:     {canonica: un,  base: un, factor: 1.0}       # hojas (papel higienico)
+  HOJAS:   {canonica: un,  base: un, factor: 1.0}
+  SET:     {canonica: un,  base: un, factor: 1.0}
+  # Un par se vende como una sola presentacion: factor 1, no 2. Un par de
+  # guantes no es intercambiable con dos guantes sueltos.
+  PAR:     {canonica: par, base: un, factor: 1.0}
+  NPR:     {canonica: par, base: un, factor: 1.0}       # UN/CEFACT: number of pairs

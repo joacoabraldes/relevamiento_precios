@@ -1,10 +1,49 @@
-# sepa-downloader
+# relevamiento-precios
 
-Descarga diaria de los archivos de precios **SEPA** (Sistema Electrónico de Publicidad de
-Precios Argentinos) y archivado **crudo** en Google Cloud Storage.
+Pipeline de relevamiento de precios de **SEPA** (Sistema Electrónico de Publicidad de
+Precios Argentinos) para construir un índice de precios de supermercado.
 
-Es la primera etapa de un proyecto de índice de precios: **solo colecta y archiva**. No
-parsea CSVs, no calcula índices, no toca bases de datos, no convierte a Parquet.
+## Estado
+
+| Etapa | Qué hace | Estado |
+|---|---|---|
+| **Descarga** — [`sepa_downloader.py`](sepa_downloader.py) | Baja los 7 ZIP diarios y los archiva crudos en `raw/` | ✅ andando |
+| **Procesamiento** — [`src/precios/normalize/`](src/precios/normalize/) | ZIP → Parquet normalizado y tipado, en `staged/` | ✅ andando |
+| **Clasificación** `id_producto → categoría` | Piloto de 10-15 categorías | ⏳ pendiente |
+| **Índice mensual** | Jevons + Laspeyres, Postgres | ⏳ pendiente |
+| **API + dashboard** | FastAPI, Metabase | ⏳ pendiente |
+| **Scraping de precios online** | Fuente distinta de SEPA | ⏳ sin empezar |
+
+> **El índice necesita dos meses de datos acumulados** para producir la primera variación
+> mensual. La descarga arrancó el 2026-08-02.
+
+## Estructura
+
+```
+sepa_downloader.py           etapa 1: descarga y archivado crudo
+src/precios/
+  config.py                  configuración por entorno, sin credenciales
+  logs.py                    logging estructurado a stdout
+  cli.py                     python -m precios.cli etl
+  normalize/                 etapa 2: procesamiento
+    lectura.py               apertura de los ZIP anidados de SEPA
+    unidades.py              normalización de unidades de medida
+    provincias.py            maestro ISO 3166-2 -> nombre
+    etl.py                   transformación a Parquet
+    gcs.py                   única capa que habla con el bucket
+config/unidades.yaml         mapeo de unidades, versionado
+tests/                       61 tests sobre ZIP sintéticos
+```
+
+El núcleo del ETL trabaja siempre con archivos locales; `gcs.py` es lo único que toca la
+red. Por eso los tests corren sin credenciales y sin bucket.
+
+---
+
+# Etapa 1 — Descarga y archivo crudo
+
+Descarga diaria de los ZIP de SEPA y archivado **crudo** en GCS (`raw/`). Solo colecta y
+archiva: no parsea CSVs, no calcula índices, no toca bases de datos.
 
 ---
 
@@ -550,5 +589,170 @@ CKAN: <https://datos.produccion.gob.ar/api/3/action/package_show?id=6f47ec76-d1c
 ## Alcance
 
 Este script **solo baja y archiva**. Nada de parsear CSVs, calcular índices, tocar bases de
-datos ni convertir a Parquet. Todo eso viene después, encima de los datos que este vaya
-juntando.
+datos ni convertir a Parquet. Eso lo hace la etapa siguiente.
+
+---
+---
+
+# Etapa 2 — Procesamiento diario: ZIP → Parquet
+
+Toma los ZIP archivados en `raw/` y produce Parquet normalizado y tipado en `staged/`.
+Una fila de salida = **un producto, en una sucursal, en un día**.
+
+```bash
+# todos los días disponibles en raw/ que todavía no se procesaron
+python -m precios.cli etl
+
+# un día puntual
+python -m precios.cli etl --fecha 2026-08-01
+
+# un rango hacia atrás (para reprocesar tras un cambio de lógica)
+python -m precios.cli etl --desde 2026-07-27 --hasta 2026-08-02 --forzar
+
+# sin escribir en GCS
+python -m precios.cli etl --fecha 2026-08-01 --salida-local ./salida
+python -m precios.cli etl --dry-run
+```
+
+**Rendimiento medido:** ~10,4 millones de observaciones por día en ~2,5 minutos,
+con DuckDB y un límite de 4 GB de memoria.
+
+## Salida
+
+```
+staged/observaciones/anio=YYYY/mes=MM/dia=DD/<comercio>.parquet
+staged/rechazados/anio=YYYY/mes=MM/dia=DD/<comercio>.parquet
+```
+
+Un Parquet por comercio dentro de cada partición (ZSTD). Reprocesar un día **vacía la
+partición y la reescribe**: es idempotente por diseño, al revés que el archivo crudo, que nunca
+se pisa. El procesado siempre tiene que poder reconstruirse desde el crudo.
+
+### Schema de `observaciones`
+
+| Columna | Tipo | Nota |
+|---|---|---|
+| `fecha` | DATE | sale de la partición de `raw/`, no del CSV |
+| `id_comercio`, `id_bandera`, `id_sucursal` | VARCHAR | |
+| `provincia` | VARCHAR | decodificada con el maestro; `DESCONOCIDA` si falta |
+| `provincia_iso` | VARCHAR | código crudo ISO 3166-2 (`AR-B`) |
+| `id_producto` | VARCHAR | **nunca numérico**: `0000000060257` pierde los ceros |
+| `es_ean` | BOOLEAN | `productos_ean='1'`; 98,96% en datos reales |
+| `descripcion`, `marca` | VARCHAR | trim + colapso de espacios + upper |
+| `cantidad_presentacion` | DOUBLE | |
+| `unidad_presentacion` | VARCHAR | canónica (`l`, `ml`, `kg`, `un`…) |
+| `unidad_presentacion_raw` | VARCHAR | lo que informó el comercio, para auditar |
+| `cantidad_base` | DOUBLE | convertida a la unidad base |
+| `unidad_base` | VARCHAR | `kg`, `l`, `un`, `m`, `m2` |
+| `precio_lista` | DOUBLE | |
+| `precio_promo` | DOUBLE | `promo1`; nulo en el 96,9% de los casos |
+| `precio_efectivo` | DOUBLE | `coalesce(promo, lista)` — la segunda serie |
+| `precio_referencia`, `cantidad_referencia`, `unidad_referencia` | | precio por unidad de medida |
+
+**`cantidad_base` es lo que va a habilitar la clasificación.** Un producto de `1 L`, uno de
+`1000 ML` y uno de `1 LT` colapsan los tres a `cantidad_base=1.0, unidad_base='l'`, así que
+"leche entera sachet 1 litro" puede agrupar las tres variantes sin reglas por comercio.
+
+## Correcciones al diseño original
+
+Tres cosas del spec original resultaron incorrectas al contrastarlas contra el Anexo II y
+los datos reales:
+
+**1. No existe el campo `ean`.** El identificador es `id_producto`; `productos_ean` es un
+flag 1/0 que indica si ese código es un EAN/GTIN real o un código interno del comercio.
+
+**2. La clave tiene que incluir `id_comercio`.** `id_sucursal` es un código interno de cada
+comercio y **no es único globalmente** — la sucursal "1" existe en varios comercios a la vez.
+Medido sobre datos reales:
+
+```
+(id_sucursal, id_producto)                → 33.146 claves duplicadas
+(id_comercio, id_sucursal, id_producto)   → 0 duplicadas
+```
+
+Con la clave sin `id_comercio`, productos de cadenas distintas se colapsan en un mismo
+quote y el ratio `precio_t / precio_{t-1}` compara cosas que no tienen relación. Es un bug
+silencioso: no rompe nada, solo devuelve un índice equivocado.
+
+**3. `precio_unitario_referencia` son tres campos, no uno:** `productos_precio_referencia`,
+`productos_cantidad_referencia` y `productos_unidad_medida_referencia`.
+
+## Rarezas del formato que el ETL absorbe
+
+Ninguna de estas es lo default de un CSV, y todas están cubiertas por tests:
+
+- **Separador pipe `|`**, no coma.
+- **BOM inconsistente**: 2 de cada 3 comercios lo mandan. Se lee con `utf-8-sig`.
+- **Fin de línea mezclado**: `\r\n` en unos comercios, `\n` en otros.
+- **Línea de pie**: el archivo termina con una línea en blanco y
+  `Última actualización: <ISO>` — que un comercio escribe `Ultima`, sin tilde. No es dato.
+  Se descarta **explícitamente por patrón**, no con `ignore_errors`, que también se tragaría
+  las filas genuinamente corruptas.
+- **Sin autodetección de dialecto**: el sniffer de DuckDB muestrea las primeras filas, en
+  archivos chicos toma la línea de pie y concluye que hay una sola columna. El dialecto se
+  declara entero (`auto_detect=false`).
+- **Unidades libres**: el Anexo especifica `l, ml, kg, gr, unidad`, pero los comercios
+  mandan más de 30 variantes. Buena parte resultaron ser códigos **UN/CEFACT Rec. 20**
+  (`KGM`, `GRM`, `LTR`, `CMQ`, `DMQ`, `CMT`, `EA`) porque exportan desde ERPs que usan ese
+  estándar. El mapeo vive en [config/unidades.yaml](config/unidades.yaml) y es versionado.
+- **Marcas truncadas**: algunos comercios cortan `productos_marca` a 5 caracteres
+  (`LA SE`, `TREGA`). No es un bug del ETL, viene así del origen. La clasificación de la
+  Etapa 2 va a tener que apoyarse en `descripcion`, no en `marca`.
+- **Comercios que no publican**: el 2026-08-01, `comercio-sepa-36` subió un ZIP de 0 bytes.
+  Un comercio roto nunca interrumpe el día: se registra y se sigue.
+
+## Nada se descarta en silencio
+
+El filtro duro es `precio_lista > 0` — un precio 0 no es un precio bajo, es un dato ausente
+disfrazado. Todo lo que no pasa va a `rechazados/` con su motivo:
+
+| `motivo_rechazo` | |
+|---|---|
+| `sin_id_producto` / `sin_id_sucursal` | falta la clave |
+| `precio_lista_nulo_o_vacio` | campo vacío |
+| `precio_lista_no_numerico` | no parsea ni con separadores mixtos |
+| `precio_lista_no_positivo` | `<= 0` |
+
+Hay un test que verifica la identidad `observaciones + rechazados + duplicados = filas del
+archivo`, así que ninguna fila puede desaparecer sin dejar rastro.
+
+Una **unidad desconocida no es motivo de rechazo**: se conserva la observación con
+`cantidad_base` nula y se cuenta aparte en el resumen. Tirar un precio válido porque no
+entendemos su unidad sería peor que el problema.
+
+## Exit codes
+
+| Código | Significado |
+|---|---|
+| `0` | Todo bien. |
+| `1` | Falló el procesamiento de algún comercio o día. **Es un bug nuestro.** |
+| `2` | Algún comercio no publicó datos usables en el origen (ZIP vacío o corrupto). Es un problema de la fuente, pasa seguido, y se separa a propósito del código 1 para que no genere fatiga de alertas. |
+
+## Variables de entorno
+
+| Variable | Default |
+|---|---|
+| `PRECIOS_BUCKET` | `outlier-archivos-precios` |
+| `PRECIOS_PREFIJO_RAW` | `raw/sepa/minorista` |
+| `PRECIOS_PREFIJO_STAGED` | `staged` |
+| `PRECIOS_PATH_UNIDADES` | `config/unidades.yaml` |
+| `PRECIOS_MEMORIA_DUCKDB` | `4GB` |
+| `PRECIOS_HILOS_DUCKDB` | `4` |
+| `PRECIOS_PRECIO_MINIMO` | `0` |
+| `PRECIOS_LOG_FORMATO` | `json` (o `texto`) |
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+61 tests sobre ZIP sintéticos que reproducen todas las rarezas de arriba. Los más
+importantes:
+
+- `test_mismo_producto_y_sucursal_en_comercios_distintos_no_se_mezclan` — el bug de la clave.
+- `test_nada_se_descarta_en_silencio` — la identidad de conteo.
+- `test_reprocesar_es_idempotente` — dos corridas dan byte a byte lo mismo.
+- `test_clave_sql_coincide_con_python` — la normalización de unidades existe en Python y en
+  SQL; si se desincronizan se pierde el 15% de las filas sin ruido. Pasó de verdad.

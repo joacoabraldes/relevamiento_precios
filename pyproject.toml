@@ -1,16 +1,26 @@
 [project]
-name = "sepa-downloader"
-version = "1.0.0"
-description = "Descarga diaria de los ZIP de precios SEPA y archivado crudo en GCS"
+name = "relevamiento-precios"
+version = "0.2.0"
+description = "Relevamiento de precios SEPA: archivado crudo, normalizacion e indice"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27,<1.0",
     "google-cloud-storage>=2.18,<4.0",
     "tzdata>=2024.1",
+    "duckdb>=1.1",
+    "pyyaml>=6.0",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pandas>=2.0",      # solo para inspeccionar resultados en tests
 ]
 
 [project.scripts]
 sepa-downloader = "sepa_downloader:main"
+precios = "precios.cli:main"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -18,3 +28,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["sepa_downloader"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q"

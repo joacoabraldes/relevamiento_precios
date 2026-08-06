@@ -3,3 +3,6 @@ google-cloud-storage>=2.18,<4.0
 # zoneinfo necesita la base de datos de zonas horarias en Windows y en imagenes
 # slim de Linux que no traen tzdata del sistema.
 tzdata>=2024.1
+duckdb>=1.1
+pyyaml>=6.0
+openpyxl>=3.1

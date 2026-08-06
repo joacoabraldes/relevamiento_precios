@@ -2,5 +2,12 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+*.egg-info/
+.pytest_cache/
+.tmp/
 *.zip
+*.parquet
 .env
+
+# Se baja del bucket en la primera corrida (_meta/referencia/), no se versiona.
+config/maestro-provincias.xlsx
