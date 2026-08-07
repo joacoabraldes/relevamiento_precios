@@ -9,7 +9,7 @@ Precios Argentinos) para construir un índice de precios de supermercado.
 |---|---|---|
 | **Descarga** — [`sepa_downloader.py`](sepa_downloader.py) | Baja los 7 ZIP diarios y los archiva crudos en `raw/` | ✅ andando |
 | **Procesamiento** — [`src/precios/normalize/`](src/precios/normalize/) | ZIP → Parquet normalizado y tipado, en `staged/` | ✅ andando |
-| **Clasificación** `id_producto → categoría` | Piloto de 10-15 categorías | ⏳ pendiente |
+| **Clasificación** — [`src/precios/classify/`](src/precios/classify/) | `id_producto → categoría`, piloto de 15 categorías | ✅ piloto andando |
 | **Índice mensual** | Jevons + Laspeyres, Postgres | ⏳ pendiente |
 | **API + dashboard** | FastAPI, Metabase | ⏳ pendiente |
 | **Scraping de precios online** | Fuente distinta de SEPA | ⏳ sin empezar |
@@ -24,15 +24,21 @@ sepa_downloader.py           etapa 1: descarga y archivado crudo
 src/precios/
   config.py                  configuración por entorno, sin credenciales
   logs.py                    logging estructurado a stdout
-  cli.py                     python -m precios.cli etl
+  cli.py                     python -m precios.cli {etl,clasificar}
   normalize/                 etapa 2: procesamiento
     lectura.py               apertura de los ZIP anidados de SEPA
     unidades.py              normalización de unidades de medida
     provincias.py            maestro ISO 3166-2 -> nombre
     etl.py                   transformación a Parquet
     gcs.py                   única capa que habla con el bucket
-config/unidades.yaml         mapeo de unidades, versionado
-tests/                       61 tests sobre ZIP sintéticos
+  classify/                  etapa 3: clasificación
+    taxonomia.py             carga de categorías y motor de reglas
+    proponer.py              propuestas para revisión humana
+config/
+  unidades.yaml              mapeo de unidades, versionado
+  categorias.yaml            taxonomía y reglas, versionado
+  mapeo_productos.csv        producto -> categoría, revisado a mano
+tests/                       99 tests
 ```
 
 El núcleo del ETL trabaja siempre con archivos locales; `gcs.py` es lo único que toca la
@@ -756,3 +762,135 @@ importantes:
 - `test_reprocesar_es_idempotente` — dos corridas dan byte a byte lo mismo.
 - `test_clave_sql_coincide_con_python` — la normalización de unidades existe en Python y en
   SQL; si se desincronizan se pierde el 15% de las filas sin ruido. Pasó de verdad.
+
+---
+---
+
+# Etapa 3 — Clasificación de productos
+
+Agrupa productos sustituibles entre sí en **categorías elementales**. Es lo que convierte
+70 mil descripciones sueltas en canastas comparables, y sin esto no hay índice posible.
+
+```bash
+# propone asignaciones sobre un día ya procesado
+python -m precios.cli clasificar --fecha 2026-07-30
+
+# o contra Parquet locales
+python -m precios.cli clasificar --origen-local ./dia30
+```
+
+## El principio: propone la máquina, decide una persona
+
+La clasificación **no se resuelve en runtime**. El proceso propone candidatos y el
+resultado queda en un archivo versionado:
+
+| Archivo | Qué es |
+|---|---|
+| [config/categorias.yaml](config/categorias.yaml) | Taxonomía y reglas. **Fuente de verdad.** |
+| `config/mapeo_productos.csv` | Mapeo `id_producto → categoría`, versionado. Se revisa a mano; la columna `revisado` arranca en `no`. |
+| `salida/revisar_ambiguos.csv` | Productos que matchearon más de una categoría. |
+| `salida/sin_clasificar_top.csv` | Los productos de más volumen que ninguna regla tocó, para decidir qué categoría agregar después. |
+
+Si un producto cambia de categoría, tiene que verse en un diff de git. Nada de similitud
+semántica ni modelos: el criterio tiene que poder explicarse en una línea.
+
+## Taxonomía
+
+Jerarquía estilo COICOP: `división → grupo → clase → categoría elemental`. El piloto son
+**15 categorías elementales** de lácteos, almacén y bebidas, sobre 6 clases COICOP.
+
+## Cómo se evalúa una regla
+
+```yaml
+almacen.arroz_largo_fino_1kg:
+  clase: "01.1.1"
+  patrones: ['\bARROZ\b', '\bLARG', '\bFINO\b']    # TODOS deben aparecer
+  excluye: ['PARBOIL', '\bBARRA\b', 'ALFAJOR', ...] # NINGUNO puede aparecer
+  unidad_base: kg
+  cantidad_min: 0.9
+  cantidad_max: 1.1
+```
+
+**La presentación hace la mitad del trabajo.** Exigir 1 kg descarta sola las barritas de
+arroz de 20 g. Para eso sirve el `cantidad_base` que normaliza la Etapa 2: un producto de
+"1 L", otro de "1000 ML" y otro de "1 LT" son el mismo para las reglas.
+
+### Un EAN es un producto físico, no una descripción
+
+Ésta es la decisión de diseño central. El mismo EAN viene descripto distinto en cada
+cadena, así que las reglas se evalúan sobre **todas** sus descripciones a la vez, con una
+asimetría deliberada:
+
+| | Criterio | Por qué |
+|---|---|---|
+| **Exclusiones** | alcanza con que **una** variante la dispare | Ver "PARBOIL" una vez es evidencia fuerte de qué producto es |
+| **Inclusiones** | alcanza con que **una** variante cumpla todos los patrones | Las descripciones vienen truncadas a ~20 caracteres; una cadena con el nombre completo rescata al resto |
+| **Presentación** | alcanza con que **una** variante entre en el rango | Hay cadenas que informan "1 unidad" y pierden el peso real |
+
+Los patrones de inclusión deben cumplirse **dentro de una misma variante**: si no, "ARROZ"
+de una descripción y "LARGO FINO" de otra se combinarían en un match que ninguna justifica.
+
+Esta asimetría salió de casos reales. El EAN `7791120037559` es arroz parboil, pero una
+cadena lo describe `ARROZ ALA DORADO LARGO FINO`: evaluando cada descripción por separado
+entraba como largo fino y contaminaba esa categoría.
+
+## Resultado del piloto (2026-07-30)
+
+| | |
+|---|---|
+| Productos en el catálogo (con EAN) | 79.901 |
+| Productos clasificados | **987** |
+| Observaciones cubiertas | **449.518** (3,07%) |
+| Ambigüedades sin resolver | 0 |
+
+La cobertura baja es **esperada y correcta**: son 15 categorías sobre un universo de 70 mil
+productos que incluye electrodomésticos, perfumería y librería. Lo que importa en esta
+etapa es la **precisión**, no el volumen: un producto mal clasificado mete ruido en el
+índice para siempre, uno sin clasificar simplemente no participa.
+
+## Falsos positivos que hubo que cazar
+
+Buscar por palabra suelta trae basura. Todos éstos son casos reales del dataset y cada uno
+tiene su test de regresión:
+
+| Producto | Entraba como | Por qué |
+|---|---|---|
+| `PALMERITAS DE MANTECA` | manteca | Repostería que lleva manteca en el nombre |
+| `ARROZ PARBOIL` | arroz largo fino | Una cadena lo describe como "largo fino" |
+| `HARINA 0000 P/PIZZA` | harina común | Es otro producto a otro precio |
+| `BARRA ARROZ TRADICIO` | arroz | Descartado por presentación (60 g) |
+| `GALLETAS AZUCARADAS` | azúcar | Exclusión por `GALLET` |
+| `CREMA DE LECHE` | leche entera | Exclusión por `\bCREMA\b` |
+
+Y un caso de precisión fina: `\b000\b` **no** matchea `HARINA 0000`. Sin los límites de
+palabra, las dos categorías de harina se solapaban.
+
+## Tests
+
+27 tests específicos de clasificación, además de los 72 del resto del pipeline. Los que
+más importan:
+
+- `test_exclusion_en_una_variante_descarta_el_producto` — el caso del arroz parboil.
+- `test_una_variante_completa_rescata_a_las_truncadas` — descripciones cortadas.
+- `test_los_patrones_deben_cumplirse_en_una_misma_variante` — no ensamblar patrones entre descripciones distintas.
+- `test_harina_000_no_matchea_0000` — el límite de palabra.
+- `test_la_taxonomia_del_repo_no_tiene_solapamientos` — ningún producto real cae en dos categorías.
+
+## Informantes excluidos
+
+SEPA obliga a informar a todo comercio de consumo masivo, no solo a supermercados. Tres de
+los 18 informantes no tienen surtido comparable y quedan fuera del análisis, según
+[config/comercios.yaml](config/comercios.yaml):
+
+| Informante | Productos distintos | Motivo |
+|---|---|---|
+| Farmacity / Simplicity | 1.952 | Farmacia |
+| Axion Energy | 177 | Tienda de estación de servicio |
+| Estación Lima | 259 | Tienda de estación de servicio, 1 sucursal |
+
+Para comparar: una cadena de supermercados informa entre 10.000 y 37.000 productos. Con
+177 productos no se sostienen quotes mes a mes en ninguna categoría.
+
+**La exclusión no toca `raw/` ni `staged/`**: el archivo crudo y el procesado siguen
+guardando a todos los informantes siempre. Se aplica recién en la capa de análisis, así que
+revertirla es borrar una línea del YAML y reprocesar, sin volver a descargar nada.

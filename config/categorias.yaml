@@ -1,0 +1,215 @@
+# Taxonomia de categorias elementales y reglas de clasificacion.
+#
+# ESTE ARCHIVO ES LA FUENTE DE VERDAD. La clasificacion no se decide en runtime:
+# aca se proponen candidatos, el resultado se revisa a mano y queda versionado en
+# mapeo_productos.csv. Si un producto cambia de categoria, tiene que verse en un
+# diff de git.
+#
+# Jerarquia estilo COICOP: division -> grupo -> clase -> categoria elemental.
+#
+# --- Como se evalua una regla -------------------------------------------------
+# Un producto entra en una categoria si cumple TODAS estas condiciones:
+#   patrones:      TODOS los regex tienen que aparecer en la descripcion
+#   alguno:        AL MENOS UNO tiene que aparecer (si la lista existe)
+#   excluye:       NINGUNO puede aparecer
+#   unidad_base:   la unidad normalizada tiene que ser exactamente esta
+#   cantidad_min/max: rango de cantidad_base (inclusive)
+#
+# Los regex se evaluan sobre la descripcion ya normalizada (mayusculas, espacios
+# colapsados) y sin distinguir acentos. Usar \b para limites de palabra: es lo
+# que hace que "\b000\b" NO matchee "HARINA 0000".
+#
+# --- Por que las exclusiones son largas ---------------------------------------
+# Medido sobre el 2026-07-30: buscar "ARROZ" trae BARRA ARROZ TRADICIO y ALFAJOR
+# ARROZ DDL; buscar "AZUCAR" trae GALLETAS AZUCARADAS y COPOS AZUCARADOS. Sin
+# exclusiones, el indice mezclaria golosinas con la canasta basica.
+#
+# --- Por que hay rangos de cantidad y no valores exactos ----------------------
+# El indice compara precios de presentaciones equivalentes. Un aceite de girasol
+# viene en 900 ml y otro en 1 L: son sustitutos directos y tienen que competir en
+# la misma categoria. Un rango los junta; un valor exacto los separaria.
+
+version: 1
+
+divisiones:
+  "01":
+    nombre: Alimentos y bebidas no alcoholicas
+    grupos:
+      "01.1":
+        nombre: Alimentos
+        clases:
+          "01.1.1":
+            nombre: Pan y cereales
+          "01.1.4":
+            nombre: Leche, queso y huevos
+          "01.1.5":
+            nombre: Aceites y grasas
+          "01.1.8":
+            nombre: Azucar, mermelada, miel y confiteria
+          "01.1.9":
+            nombre: Productos alimenticios n.c.p.
+      "01.2":
+        nombre: Bebidas no alcoholicas
+        clases:
+          "01.2.1":
+            nombre: Cafe, te, yerba y cacao
+
+categorias:
+
+  # ---------------------------------------------------------------- lacteos --
+  lacteos.leche_entera_1l:
+    clase: "01.1.4"
+    nombre: Leche entera, 1 litro
+    patrones: ['\bLECHE\b', '\bENT(ERA|E)?\b']
+    excluye: ['CHOCOLAT', 'INFANTIL', 'POLVO', 'CONDENS', '\bCREMA\b', 'DESLACTOS',
+              '\bDESC\w*\b', '\bSEMI\b', '\bSOJA\b', '\bALMEND\w*\b', 'FORMULA']
+    unidad_base: l
+    cantidad_min: 0.9
+    cantidad_max: 1.1
+
+  lacteos.leche_descremada_1l:
+    clase: "01.1.4"
+    nombre: Leche descremada o semidescremada, 1 litro
+    patrones: ['\bLECHE\b']
+    # \bDESC\w*\b cubre DESC / DESCRE / DESCREM / DESCREMADA: las cadenas truncan
+    # la descripcion a ~20 caracteres y aparecen las cuatro formas.
+    alguno: ['\bDESC\w*\b', '\bSEMI\b', '\bLIGHT\b', '\bPARC\w*\b']
+    excluye: ['CHOCOLAT', 'INFANTIL', 'POLVO', 'CONDENS', '\bCREMA\b', 'DESLACTOS',
+              '\bSOJA\b', '\bALMEND\w*\b', 'FORMULA']
+    unidad_base: l
+    cantidad_min: 0.9
+    cantidad_max: 1.1
+
+  lacteos.yogur_firme_pote:
+    clase: "01.1.4"
+    nombre: Yogur firme, pote individual
+    patrones: ['\bYOGUR(T)?\b', '\bFIRME\b']
+    excluye: ['\bBARRA\b', 'CEREAL', '\bBEB\w*\b', '\bPACK\b', '\bX\s?\d+\b',
+              '\bPOSTRE\b', '\bFLAN\b', '\bSALSA\b', 'ADEREZO']
+    unidad_base: kg
+    cantidad_min: 0.1
+    cantidad_max: 0.25
+
+  lacteos.yogur_bebible_litro:
+    clase: "01.1.4"
+    nombre: Yogur bebible, 1 litro
+    patrones: ['\bYOGUR(T)?\b']
+    alguno: ['\bBEB\w*\b', '\bLIQUID\w*\b']
+    excluye: ['\bBARRA\b', 'CEREAL']
+    unidad_base: kg
+    cantidad_min: 0.9
+    cantidad_max: 1.2
+
+  lacteos.manteca_200g:
+    clase: "01.1.4"
+    nombre: Manteca, 200 g
+    patrones: ['\bMANTECA\b']
+    # PALMERITAS DE MANTECA entraba como manteca: es reposteria, no manteca.
+    excluye: ['\bMANI\b', 'CACAO', '\bCREMA\b', 'MARGARINA',
+              'PALMERIT', 'GALLET', 'FACTURA', 'BIZCOCH', 'MEDIALUNA',
+              'ALFAJOR', 'BUDIN', 'TOSTADA', 'HOJALDRE', '\bTAPA(S)?\b']
+    unidad_base: kg
+    cantidad_min: 0.18
+    cantidad_max: 0.22
+
+  # ---------------------------------------------------------------- aceites --
+  almacen.aceite_girasol_900ml:
+    clase: "01.1.5"
+    nombre: Aceite de girasol, 900 ml a 1 litro
+    patrones: ['\bACEITE\b', 'GIRASOL']
+    excluye: ['\bOLIVA\b', '\bMEZCLA\b', '\bAEROSOL\b', '\bSPRAY\b']
+    unidad_base: l
+    cantidad_min: 0.85
+    cantidad_max: 1.05
+
+  almacen.aceite_mezcla_900ml:
+    clase: "01.1.5"
+    nombre: Aceite de mezcla, 900 ml a 1 litro
+    patrones: ['\bACEITE\b', '\bMEZCLA\b']
+    excluye: ['\bOLIVA\b', '\bAEROSOL\b', '\bSPRAY\b']
+    unidad_base: l
+    cantidad_min: 0.85
+    cantidad_max: 1.05
+
+  # ------------------------------------------------------------- farinaceos --
+  almacen.harina_trigo_000_1kg:
+    clase: "01.1.1"
+    nombre: Harina de trigo 000, 1 kg
+    # \b000\b no matchea "0000": es justamente el caso que separa las dos categorias.
+    patrones: ['\bHARINA\b', '\b000\b']
+    excluye: ['\bMANI\b', 'INTEGRAL', 'LEUDANTE', '\bMAIZ\b', '\bSOJA\b', '\bGARBANZO\b',
+              'PIZZA', 'PREMEZCLA', '\bAVENA\b', 'ALMEND']
+    unidad_base: kg
+    cantidad_min: 0.9
+    cantidad_max: 1.1
+
+  almacen.harina_trigo_0000_1kg:
+    clase: "01.1.1"
+    nombre: Harina de trigo 0000, 1 kg
+    patrones: ['\bHARINA\b', '\b0000\b']
+    excluye: ['\bMANI\b', 'INTEGRAL', 'LEUDANTE', '\bMAIZ\b', '\bSOJA\b', '\bGARBANZO\b',
+              'PIZZA', 'PREMEZCLA', '\bAVENA\b', 'ALMEND']
+    unidad_base: kg
+    cantidad_min: 0.9
+    cantidad_max: 1.1
+
+  almacen.arroz_largo_fino_1kg:
+    clase: "01.1.1"
+    nombre: Arroz largo fino, 1 kg
+    patrones: ['\bARROZ\b', '\bLARG', '\bFINO\b']
+    # PARBOIL importa: hay un EAN que una cadena describe "ARROZ PARBOIL" y otra
+    # "ARROZ ALA DORADO LARGO FINO". Como las exclusiones se evaluan sobre todas
+    # las descripciones del producto, la primera gana y el producto queda afuera.
+    excluye: ['\bBARRA\b', 'ALFAJOR', 'GALLET', '\bLECHE\b', 'INTEGRAL', 'PARBOIL',
+              'YAMANI', '\bDOBLE\b', 'ARBOREO', 'BASMATI', 'SALVAJE', '\bDORADO\b']
+    unidad_base: kg
+    cantidad_min: 0.9
+    cantidad_max: 1.1
+
+  almacen.fideos_secos_500g:
+    clase: "01.1.1"
+    nombre: Fideos secos, 500 g
+    patrones: ['\bFIDEO(S)?\b']
+    excluye: ['\bFRESCO\w*\b', 'RELLEN', '\bSOPA\b', 'INSTANT', '\bWOK\b', 'INTEGRAL']
+    unidad_base: kg
+    cantidad_min: 0.45
+    cantidad_max: 0.55
+
+  # ------------------------------------------------------------------ otros --
+  almacen.azucar_comun_1kg:
+    clase: "01.1.8"
+    nombre: Azucar comun, 1 kg
+    patrones: ['\bAZUCAR\b']
+    excluye: ['COPO', 'GALLET', 'CEREAL', 'IMPALPABLE', 'MASCABO', '\bLIGHT\b',
+              'AZUCARAD', 'RUBIA', 'ORGANIC', 'EDULCOR']
+    unidad_base: kg
+    cantidad_min: 0.9
+    cantidad_max: 1.1
+
+  almacen.sal_fina_500g:
+    clase: "01.1.9"
+    nombre: Sal fina, 500 g
+    patrones: ['\bSAL\b', '\bFINA\b']
+    excluye: ['\bGRUESA\b', '\bMARINA\b', 'PARRILL', '\bBAJO SODIO\b', 'CONDIMENT']
+    unidad_base: kg
+    cantidad_min: 0.4
+    cantidad_max: 0.6
+
+  # ----------------------------------------------------------------- yerba ---
+  bebidas.yerba_mate_500g:
+    clase: "01.2.1"
+    nombre: Yerba mate, 500 g
+    patrones: ['\bYERBA\b']
+    excluye: ['\bMATE COCIDO\b', 'SAQUIT', '\bTE\b', 'COMPUESTA']
+    unidad_base: kg
+    cantidad_min: 0.45
+    cantidad_max: 0.55
+
+  bebidas.yerba_mate_1kg:
+    clase: "01.2.1"
+    nombre: Yerba mate, 1 kg
+    patrones: ['\bYERBA\b']
+    excluye: ['\bMATE COCIDO\b', 'SAQUIT', '\bTE\b', 'COMPUESTA']
+    unidad_base: kg
+    cantidad_min: 0.9
+    cantidad_max: 1.1

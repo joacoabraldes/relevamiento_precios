@@ -39,6 +39,9 @@ class Config:
     dir_config: Path
     path_unidades: Path
     path_provincias: Path
+    path_categorias: Path
+    path_comercios: Path
+    path_mapeo: Path
 
     tmpdir: str | None
     memoria_duckdb: str
@@ -72,6 +75,16 @@ class Config:
                     "PRECIOS_PATH_PROVINCIAS",
                     str(dir_config / "maestro-provincias.xlsx"),
                 )
+            ),
+            path_categorias=Path(
+                _env("PRECIOS_PATH_CATEGORIAS", str(dir_config / "categorias.yaml"))
+            ),
+            path_comercios=Path(
+                _env("PRECIOS_PATH_COMERCIOS", str(dir_config / "comercios.yaml"))
+            ),
+            # El mapeo revisado a mano: es la fuente de verdad y va versionado.
+            path_mapeo=Path(
+                _env("PRECIOS_PATH_MAPEO", str(dir_config / "mapeo_productos.csv"))
             ),
             tmpdir=os.environ.get("PRECIOS_TMPDIR") or None,
             memoria_duckdb=_env("PRECIOS_MEMORIA_DUCKDB", "4GB"),

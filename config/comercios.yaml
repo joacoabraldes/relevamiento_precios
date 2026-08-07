@@ -1,0 +1,33 @@
+# Informantes de SEPA excluidos del indice.
+#
+# IMPORTANTE: esta exclusion NO toca raw/ ni staged/. El archivo crudo y el
+# procesado siguen conteniendo a todos los informantes, siempre. Esto se aplica
+# recien en la capa de analisis (clasificacion e indice), asi que revertirlo es
+# borrar una linea de aca y reprocesar, sin volver a bajar nada.
+#
+# Criterio: SEPA obliga a informar a todo comercio que venda consumo masivo, no
+# solo a supermercados. Una farmacia o una tienda de estacion de servicio venden
+# algunos productos de la canasta, pero con una estructura de precios distinta
+# (menos surtido, mayor margen, sin competencia de gondola). Mezclarlos con
+# supermercados agrega ruido sin agregar cobertura util.
+
+version: 1
+
+excluidos:
+
+  "24":
+    nombre: Farmcity S.A. (FARMACITY, SIMPLICITY)
+    motivo: >
+      Farmacia. Vende parte de la canasta pero con muy poco surtido comparable:
+      1.952 productos contra 37.432 de una cadena de supermercados.
+
+  "23":
+    nombre: Pan American Energy (Axion Energy)
+    motivo: >
+      Tienda de estacion de servicio. 177 productos distintos en total: no
+      alcanza para sostener quotes mes a mes en ninguna categoria.
+
+  "4":
+    nombre: Estacion Lima S.A.
+    motivo: >
+      Tienda de estacion de servicio. 259 productos y una sola sucursal.

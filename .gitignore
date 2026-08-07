@@ -11,3 +11,7 @@ venv/
 
 # Se baja del bucket en la primera corrida (_meta/referencia/), no se versiona.
 config/maestro-provincias.xlsx
+
+# Reportes regenerables de la clasificacion. El mapeo revisado
+# (config/mapeo_productos.csv) SI se versiona: es la fuente de verdad.
+salida/

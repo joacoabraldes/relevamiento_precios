@@ -177,6 +177,96 @@ def _resumen(resultados, cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+def comando_clasificar(args: argparse.Namespace, cfg: Config) -> int:
+    """Etapa 3: propone asignaciones producto -> categoria para revision humana."""
+    from .classify import proponer as prop_mod
+    from .classify.taxonomia import Taxonomia
+    from .comercios import ListaComercios
+
+    taxonomia = Taxonomia.desde_yaml(cfg.path_categorias)
+    log(logging.INFO, "taxonomia cargada", categorias=len(taxonomia),
+        clases=len(taxonomia.clases))
+
+    comercios = ListaComercios.desde_yaml(cfg.path_comercios)
+    if len(comercios):
+        for i in comercios.ids:
+            d = comercios.detalle(i)
+            log(logging.INFO, "informante excluido del analisis",
+                id_comercio=i, nombre=d.nombre if d else "", motivo=d.motivo if d else "")
+
+    tmp: Path | None = None
+    try:
+        if args.origen_local:
+            glob = f"{Path(args.origen_local).as_posix()}/*.parquet"
+        else:
+            from .normalize.gcs import ClienteBucket
+
+            cliente = ClienteBucket(cfg)
+            fecha = date.fromisoformat(args.fecha)
+            prefijo = cfg.particion("observaciones", fecha)
+            nombres = [n for n in cliente.listar(prefijo) if n.endswith(".parquet")]
+            if not nombres:
+                log(logging.CRITICAL, "no hay datos procesados para esa fecha",
+                    fecha=args.fecha, prefijo=prefijo)
+                return 1
+            tmp = Path(tempfile.mkdtemp(prefix="sepa_clas_", dir=cfg.tmpdir))
+            log(logging.INFO, "bajando particion", fecha=args.fecha, archivos=len(nombres))
+            for n in nombres:
+                cliente.bajar(n, tmp / Path(n).name)
+            glob = f"{tmp.as_posix()}/*.parquet"
+
+        catalogo = prop_mod.construir_catalogo(glob, cfg.memoria_duckdb, comercios)
+        log(logging.INFO, "catalogo construido", productos=len(catalogo))
+
+        propuestas, resumen = prop_mod.proponer(catalogo, taxonomia)
+        prop_mod.log_resumen(resumen, taxonomia)
+
+        dir_salida = Path(args.salida)
+        n_mapeo = prop_mod.escribir_mapeo(propuestas, cfg.path_mapeo)
+        n_rev = prop_mod.escribir_revision(propuestas, dir_salida / "revisar_ambiguos.csv")
+        n_sin = prop_mod.escribir_sin_clasificar(
+            catalogo, propuestas, dir_salida / "sin_clasificar_top.csv"
+        )
+    finally:
+        if tmp is not None:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    ancho = 92
+    print("", flush=True)
+    print("=" * ancho)
+    print(f"CLASIFICACION PROPUESTA — {len(taxonomia)} categorias piloto")
+    print("=" * ancho)
+    print(f"{'CATEGORIA':<38} {'PRODUCTOS':>10} {'OBSERVACIONES':>15}")
+    print("-" * ancho)
+    for cod in sorted(resumen.por_categoria, key=lambda c: -resumen.por_categoria[c][1]):
+        n_p, n_o = resumen.por_categoria[cod]
+        print(f"{cod:<38} {n_p:>10,} {n_o:>15,}")
+    vacias = [r.codigo for r in taxonomia.reglas if r.codigo not in resumen.por_categoria]
+    for cod in vacias:
+        print(f"{cod:<38} {0:>10} {0:>15}   <-- sin productos")
+    print("-" * ancho)
+    print(f"{'TOTAL ASIGNADO':<38} {resumen.productos_asignados:>10,} "
+          f"{resumen.obs_asignadas:>15,}")
+    print("-" * ancho)
+    print(f"productos en el catalogo (con EAN): {resumen.productos_totales:,}")
+    print(f"cobertura: {resumen.cobertura_productos:.2f}% de los productos, "
+          f"{resumen.cobertura_obs:.2f}% de las observaciones")
+    print(f"ambiguos (reglas que se pisan):     {resumen.ambiguos_entre_categorias:,}")
+    print(f"ambiguos (cadenas que discrepan):   {resumen.ambiguos_entre_variantes:,}")
+    print("")
+    print(f"mapeo versionable  -> {cfg.path_mapeo}  ({n_mapeo:,} filas)")
+    print(f"para revisar       -> {dir_salida / 'revisar_ambiguos.csv'}  ({n_rev:,} filas)")
+    print(f"sin clasificar     -> {dir_salida / 'sin_clasificar_top.csv'}  ({n_sin:,} productos)")
+    print("=" * ancho, flush=True)
+
+    if vacias:
+        log(logging.WARNING, "hay categorias sin ningun producto", categorias=vacias,
+            exit_code=2)
+        return 2
+    log(logging.INFO, "fin ok", exit_code=0)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="precios", description="Pipeline de precios SEPA")
     sub = p.add_subparsers(dest="comando", required=True)
@@ -191,12 +281,23 @@ def main(argv=None) -> int:
                    help="procesa pero no escribe en GCS")
     e.add_argument("--salida-local", help="escribe el Parquet en este directorio local")
 
+    c = sub.add_parser("clasificar",
+                       help="Etapa 3: propone producto -> categoria para revision")
+    c.add_argument("--fecha", help="fecha procesada a usar como base (YYYY-MM-DD)")
+    c.add_argument("--origen-local", help="directorio local con los Parquet, en vez de GCS")
+    c.add_argument("--salida", default="salida",
+                   help="directorio para los reportes de revision (default: salida/)")
+
     args = p.parse_args(argv)
     cfg = Config.desde_entorno()
     configurar(cfg.log_nivel, cfg.log_formato)
 
     if args.comando == "etl":
         return comando_etl(args, cfg)
+    if args.comando == "clasificar":
+        if not args.fecha and not args.origen_local:
+            p.error("clasificar necesita --fecha o --origen-local")
+        return comando_clasificar(args, cfg)
     return 2
 
 
