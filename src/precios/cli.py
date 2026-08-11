@@ -267,6 +267,114 @@ def comando_clasificar(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def comando_quotes(args: argparse.Namespace, cfg: Config) -> int:
+    """Etapa 4.1: colapsa las observaciones diarias a quotes mensuales.
+
+    Se procesa un comercio por vez para acotar la memoria: un mes entero son
+    cientos de millones de filas y el mayor comercio aporta ~125M el solo.
+    """
+    from collections import defaultdict
+
+    from .index import quotes as q
+    from .normalize.gcs import ClienteBucket
+
+    anio, mes = args.anio, args.mes
+    cliente = ClienteBucket(cfg)
+
+    prefijo_dia = f"{cfg.prefijo_staged}/observaciones/anio={anio:04d}/mes={mes:02d}/"
+    nombres = [n for n in cliente.listar(prefijo_dia) if n.endswith(".parquet")]
+    if not nombres:
+        log(logging.CRITICAL, "no hay observaciones procesadas para ese mes",
+            anio=anio, mes=mes, prefijo=prefijo_dia)
+        return 1
+
+    dias = sorted({n.split("/dia=")[1].split("/")[0] for n in nombres if "/dia=" in n})
+    por_comercio: dict[str, list[str]] = defaultdict(list)
+    sin_comercio = []
+    for n in nombres:
+        c = q.comercio_de_archivo(n)
+        (por_comercio[c] if c else sin_comercio).append(n)
+    if sin_comercio:
+        log(logging.WARNING, "archivos sin comercio identificable",
+            cantidad=len(sin_comercio))
+
+    resumen = q.ResumenQuotes(anio=anio, mes=mes, dias_disponibles=len(dias))
+    resumen.comercios = len(por_comercio)
+    log(logging.INFO, "colapsando a quotes mensuales", anio=anio, mes=mes,
+        dias=len(dias), comercios=len(por_comercio), archivos=len(nombres))
+
+    tmp = Path(tempfile.mkdtemp(prefix="sepa_quotes_", dir=cfg.tmpdir))
+    try:
+        dir_q = tmp / "quotes"
+        dir_c = tmp / "catalogo"
+        for d in (dir_q, dir_c):
+            d.mkdir(parents=True, exist_ok=True)
+        con = q.conectar(cfg.memoria_duckdb, cfg.hilos_duckdb, tmp)
+
+        for comercio in sorted(por_comercio, key=lambda c: int(c) if c.isdigit() else 0):
+            archivos_remotos = sorted(por_comercio[comercio])
+            dir_local = tmp / f"c{comercio}"
+            dir_local.mkdir(exist_ok=True)
+            locales = []
+            for r in archivos_remotos:
+                destino = dir_local / Path(r).name
+                if cliente.bajar(r, destino):
+                    locales.append(destino)
+            if not locales:
+                continue
+            n_q, n_min = q.colapsar_comercio(
+                con, locales, anio, mes,
+                dir_q / f"comercio-{comercio}.parquet",
+                dir_c / f"comercio-{comercio}.parquet",
+                minimo_dias=args.minimo_dias,
+            )
+            resumen.quotes += n_q
+            resumen.quotes_con_minimo += n_min
+            log(logging.INFO, "comercio colapsado", comercio=comercio,
+                dias=len(locales), quotes=n_q, con_minimo=n_min)
+            shutil.rmtree(dir_local, ignore_errors=True)
+
+        resumen.productos = con.execute(
+            f"SELECT count(DISTINCT id_producto) FROM "
+            f"read_parquet('{dir_c.as_posix()}/*.parquet')"
+        ).fetchone()[0]
+        con.close()
+
+        if args.dry_run:
+            log(logging.INFO, "[dry-run] no se sube nada")
+        else:
+            for tabla, origen in (("quotes_mensuales", dir_q),
+                                  ("catalogo_productos", dir_c)):
+                prefijo = (f"{cfg.prefijo_staged}/{tabla}/"
+                           f"anio={anio:04d}/mes={mes:02d}")
+                cliente.borrar_prefijo(prefijo)
+                n = cliente.subir_directorio(origen, prefijo)
+                log(logging.INFO, "particion subida", tabla=tabla,
+                    prefijo=prefijo, archivos=n)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    ancho = 78
+    print("", flush=True)
+    print("=" * ancho)
+    print(f"QUOTES MENSUALES {anio}-{mes:02d}" + ("  [DRY-RUN]" if args.dry_run else ""))
+    print("=" * ancho)
+    print(f"  dias del mes procesados      {resumen.dias_disponibles:>12,}")
+    print(f"  comercios                    {resumen.comercios:>12,}")
+    print(f"  quotes (producto x sucursal) {resumen.quotes:>12,}")
+    print(f"  con >= {args.minimo_dias} dias observados    {resumen.quotes_con_minimo:>12,} "
+          f"({resumen.cobertura_minimo:.1f}%)")
+    print(f"  productos distintos          {resumen.productos:>12,}")
+    print("=" * ancho, flush=True)
+
+    if resumen.dias_disponibles < 28:
+        log(logging.WARNING, "el mes esta incompleto: la serie no es comparable todavia",
+            dias=resumen.dias_disponibles, exit_code=2)
+        return 2
+    log(logging.INFO, "fin ok", exit_code=0)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="precios", description="Pipeline de precios SEPA")
     sub = p.add_subparsers(dest="comando", required=True)
@@ -288,12 +396,24 @@ def main(argv=None) -> int:
     c.add_argument("--salida", default="salida",
                    help="directorio para los reportes de revision (default: salida/)")
 
+    q = sub.add_parser("quotes",
+                       help="Etapa 4.1: colapsa observaciones diarias a quotes mensuales")
+    q.add_argument("--anio", type=int, required=True)
+    q.add_argument("--mes", type=int, required=True)
+    q.add_argument("--minimo-dias", type=int, default=5,
+                   help="dias observados minimos para que el quote entre al indice "
+                        "(no filtra la tabla, solo marca la bandera; default: 5)")
+    q.add_argument("--dry-run", action="store_true",
+                   help="colapsa pero no sube nada a GCS")
+
     args = p.parse_args(argv)
     cfg = Config.desde_entorno()
     configurar(cfg.log_nivel, cfg.log_formato)
 
     if args.comando == "etl":
         return comando_etl(args, cfg)
+    if args.comando == "quotes":
+        return comando_quotes(args, cfg)
     if args.comando == "clasificar":
         if not args.fecha and not args.origen_local:
             p.error("clasificar necesita --fecha o --origen-local")

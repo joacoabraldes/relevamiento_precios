@@ -10,6 +10,7 @@ Precios Argentinos) para construir un índice de precios de supermercado.
 | **Descarga** — [`sepa_downloader.py`](sepa_downloader.py) | Baja los 7 ZIP diarios y los archiva crudos en `raw/` | ✅ andando |
 | **Procesamiento** — [`src/precios/normalize/`](src/precios/normalize/) | ZIP → Parquet normalizado y tipado, en `staged/` | ✅ andando |
 | **Clasificación** — [`src/precios/classify/`](src/precios/classify/) | `id_producto → categoría`, piloto de 15 categorías | ✅ piloto andando |
+| **Quotes mensuales** — [`src/precios/index/`](src/precios/index/) | Colapso diario → mensual, se conserva para siempre | ✅ andando |
 | **Índice mensual** | Jevons + Laspeyres, Postgres | ⏳ pendiente |
 | **API + dashboard** | FastAPI, Metabase | ⏳ pendiente |
 | **Scraping de precios online** | Fuente distinta de SEPA | ⏳ sin empezar |
@@ -34,11 +35,14 @@ src/precios/
   classify/                  etapa 3: clasificación
     taxonomia.py             carga de categorías y motor de reglas
     proponer.py              propuestas para revisión humana
+  index/                     etapa 4: colapso mensual e índice
+    quotes.py                observaciones diarias -> quotes mensuales
 config/
+  lifecycle.json             política de retención del bucket
   unidades.yaml              mapeo de unidades, versionado
   categorias.yaml            taxonomía y reglas, versionado
   mapeo_productos.csv        producto -> categoría, revisado a mano
-tests/                       99 tests
+tests/                       112 tests
 ```
 
 El núcleo del ETL trabaja siempre con archivos locales; `gcs.py` es lo único que toca la
@@ -894,3 +898,147 @@ Para comparar: una cadena de supermercados informa entre 10.000 y 37.000 product
 **La exclusión no toca `raw/` ni `staged/`**: el archivo crudo y el procesado siguen
 guardando a todos los informantes siempre. Se aplica recién en la capa de análisis, así que
 revertirla es borrar una línea del YAML y reprocesar, sin volver a descargar nada.
+
+---
+---
+
+# Retención del bucket (TTL y ciclo de vida)
+
+La política vive versionada en [config/lifecycle.json](config/lifecycle.json).
+
+| Prefijo | Retención | Clase fría |
+|---|---|---|
+| `raw/` | **TTL 12 meses** | Coldline a los 90 días |
+| `staged/observaciones/` | **TTL 12 meses** | Nearline a los 90 días |
+| `staged/quotes_mensuales/` | **para siempre** | — |
+| `staged/catalogo_productos/` | **para siempre** | — |
+| `_meta/` | **para siempre** | — |
+
+Los prefijos sin regla se conservan indefinidamente: son el insumo que permite recalcular
+el índice cuando el detalle diario ya venció.
+
+## Aplicarla
+
+Requiere `storage.buckets.update` (rol `roles/storage.admin` sobre el bucket).
+**`roles/storage.objectAdmin` no alcanza** — sirve para leer y escribir objetos, no para
+cambiar la configuración del bucket.
+
+```bash
+gcloud storage buckets update gs://outlier-archivos-precios \
+  --lifecycle-file=config/lifecycle.json
+
+# verificar que quedó activa
+gcloud storage buckets describe gs://outlier-archivos-precios \
+  --format="json(lifecycle)"
+```
+
+## Tamaño resultante
+
+Con esta política el bucket se estabiliza:
+
+| | Año 1 | Año 5 | Año 10 |
+|---|---|---|---|
+| `raw/` + `staged/observaciones/` | 183 GB | 183 GB | 183 GB |
+| `quotes_mensuales` + `catalogo` | 2,6 GB | 13 GB | 26 GB |
+| **Total** | **186 GB** | **196 GB** | **209 GB** |
+
+Costo aproximado en `southamerica-east1`: USD 2,5–3 por mes, estable.
+
+## Nada se borra hasta 2027
+
+Todas las reglas de borrado exigen `age: 365`. El objeto más viejo del bucket es del
+**2026-07-27**, así que la primera baja efectiva sería el **2027-07-27**. Hasta entonces
+la política es completamente reversible: se quita la regla y no se perdió nada.
+
+> **Antes de esa fecha hay que tener construido el pipeline de quotes mensuales**
+> (`staged/quotes_mensuales/` y `staged/catalogo_productos/`). Si el TTL vence sin que esas
+> tablas existan, el detalle diario se pierde sin haber dejado el resumen que permite
+> recalcular el índice. Hay 12 meses de margen, pero el orden importa.
+
+---
+---
+
+# Etapa 4.1 — Quotes mensuales
+
+Colapsa las observaciones diarias a **un precio por quote por mes**, que es el insumo
+directo del índice.
+
+```bash
+python -m precios.cli quotes --anio 2026 --mes 8
+python -m precios.cli quotes --anio 2026 --mes 8 --dry-run
+python -m precios.cli quotes --anio 2026 --mes 8 --minimo-dias 10
+```
+
+Salida:
+
+```
+staged/quotes_mensuales/anio=YYYY/mes=MM/comercio-<N>.parquet
+staged/catalogo_productos/anio=YYYY/mes=MM/comercio-<N>.parquet
+```
+
+## Qué es un quote
+
+La unidad de medición del índice: **un producto, en una sucursal concreta, de un comercio
+concreto** — `(id_comercio, id_sucursal, id_producto)`. El precio del mes es la **mediana**
+de sus precios diarios.
+
+Mediana y no promedio: con precios `1000, 1000, 1000, 1000, 99999` (el último es un error
+de carga), la mediana da 1000 y el promedio da 20.800.
+
+## Esta tabla es la que hace seguro el TTL
+
+`raw/` y `staged/observaciones/` vencen a los 12 meses. **`quotes_mensuales` y
+`catalogo_productos` se conservan para siempre**, y son lo que permite recalcular la serie
+completa con una clasificación corregida aunque el detalle diario ya no exista.
+
+Para que esa promesa se sostenga hay dos decisiones deliberadas:
+
+**1. Se guardan todos los comercios**, incluidos los que hoy se excluyen del análisis
+(Farmacity, estaciones de servicio). Filtrar acá sería irreversible una vez vencido el
+crudo; filtrar al calcular el índice no lo es.
+
+**2. Se guardan todos los quotes**, incluidos los que no llegan al mínimo de días
+observados, junto con `n_dias` y la bandera `cumple_minimo_dias`. Así el umbral se puede
+cambiar más adelante sin reprocesar nada.
+
+También se conservan `precio_lista_min`, `precio_lista_max`, `primera_fecha` y
+`ultima_fecha`, que permiten auditar y re-derivar sin el detalle diario.
+
+## Por qué hace falta el catálogo de productos
+
+Los quotes solo tienen **claves y precios** — no dicen qué producto es cada uno. Sin el
+catálogo quedarían precios que no se pueden reclasificar.
+
+El catálogo guarda por producto la descripción más frecuente, la marca, la presentación
+normalizada y hasta 5 descripciones alternativas (el mismo EAN viene descripto distinto en
+cada cadena). Son ~84.000 filas y **2 MB por mes**.
+
+## Lo que esto NO cubre
+
+Los quotes protegen de errores de **clasificación**, no de errores de **normalización**. La
+mediana ya se calculó sobre la salida del ETL: si el bug está en la Etapa 2 —como el de
+unidades que afectaba al 15% de las filas— los quotes lo heredan y solo el crudo lo arregla.
+
+Por eso el TTL del crudo es de 12 meses y no menos: es la ventana para detectar ese tipo de
+problema.
+
+## Tamaño
+
+Medido sobre las particiones reales de julio y agosto 2026: **~15,2 millones de quotes por
+mes**, **134 MB/mes** en Parquet.
+
+| | Por mes | Por año |
+|---|---|---|
+| `quotes_mensuales` | 134 MB | **1,61 GB** |
+| `catalogo_productos` | 5 MB | 0,06 GB |
+| **Total a conservar para siempre** | 139 MB | **1,67 GB** |
+
+Es menos del **1%** de lo que ocupan el crudo y el detalle diario juntos (183 GB/año). El
+Parquet queda particionado por comercio, así que cada archivo tiene un solo `id_comercio` y
+ZSTD lo comprime casi a cero.
+
+## Meses incompletos
+
+El comando sale con **exit code 2** si el mes tiene menos de 28 días procesados, para que
+no se use por error una serie que no es comparable. Julio 2026 tiene solo 5 días (el
+archivo arrancó el 27/07) y agosto está en curso.

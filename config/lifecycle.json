@@ -1,0 +1,36 @@
+{
+  "_comentario": [
+    "Politica de retencion del bucket gs://outlier-archivos-precios.",
+    "Aplicar con: gcloud storage buckets update gs://outlier-archivos-precios --lifecycle-file=config/lifecycle.json",
+    "",
+    "raw/ y staged/observaciones/ : TTL 12 meses, con transicion a clase fria a los 90 dias.",
+    "staged/quotes_mensuales/, staged/catalogo_productos/ y _meta/ NO tienen regla:",
+    "se conservan para siempre. Son el insumo que permite recalcular el indice",
+    "cuando el detalle diario ya haya vencido.",
+    "",
+    "IMPORTANTE: ninguna regla borra nada antes de los 365 dias. El objeto mas",
+    "viejo del bucket es del 2026-07-27, asi que la primera baja recien seria",
+    "el 2027-07-27. Hasta entonces esto es totalmente reversible: se quita la",
+    "regla y no se perdio nada."
+  ],
+  "lifecycle": {
+    "rule": [
+      {
+        "action": { "type": "SetStorageClass", "storageClass": "COLDLINE" },
+        "condition": { "age": 90, "matchesPrefix": ["raw/"] }
+      },
+      {
+        "action": { "type": "Delete" },
+        "condition": { "age": 365, "matchesPrefix": ["raw/"] }
+      },
+      {
+        "action": { "type": "SetStorageClass", "storageClass": "NEARLINE" },
+        "condition": { "age": 90, "matchesPrefix": ["staged/observaciones/"] }
+      },
+      {
+        "action": { "type": "Delete" },
+        "condition": { "age": 365, "matchesPrefix": ["staged/observaciones/"] }
+      }
+    ]
+  }
+}
