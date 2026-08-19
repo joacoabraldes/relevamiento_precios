@@ -67,6 +67,23 @@ CREATE OR REPLACE TABLE clasificacion (
 
 NOMBRE_ARCHIVO = "clasificacion.parquet"
 
+# Los comercios excluidos van en su PROPIO prefijo y no al lado de la
+# clasificacion: el consumidor lee cada prefijo con un `read_parquet` de todos
+# los archivos que encuentra, asi que dos esquemas distintos en la misma carpeta
+# lo romperian.
+NOMBRE_ARCHIVO_COMERCIOS = "comercios_excluidos.parquet"
+
+COLUMNAS_COMERCIOS = ("id_comercio", "nombre", "motivo", "generado_en")
+
+DDL_COMERCIOS = """
+CREATE OR REPLACE TABLE comercios_excluidos (
+    id_comercio VARCHAR,
+    nombre      VARCHAR,
+    motivo      VARCHAR,
+    generado_en TIMESTAMP
+)
+"""
+
 
 def _grupo_de_clase(clase: str) -> str:
     """`01.1.5` -> `01.1`."""
@@ -142,23 +159,55 @@ def filas_clasificacion(
     return filas
 
 
-def escribir_parquet(filas: list[tuple], destino: Path) -> Path:
-    """Escribe las filas como Parquet. Devuelve el path escrito."""
+def filas_comercios_excluidos(
+    lista, generado_en: dt.datetime | None = None
+) -> list[tuple]:
+    """Los informantes que no entran al indice, con el motivo.
+
+    El repo de reporte los necesita para no bajarlos siquiera. Va con el motivo
+    y no solo el id: dentro de un año nadie se acuerda de por que el 23 no esta.
+    """
+    generado_en = generado_en or dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    filas = []
+    for id_comercio in lista.ids:
+        det = lista.detalle(id_comercio)
+        filas.append(
+            (
+                id_comercio,
+                det.nombre if det else "",
+                " ".join((det.motivo if det else "").split()),
+                generado_en,
+            )
+        )
+    return filas
+
+
+def _escribir(ddl: str, tabla: str, columnas, filas: list[tuple], destino: Path) -> Path:
     destino.parent.mkdir(parents=True, exist_ok=True)
     con = duckdb.connect()
     try:
-        con.execute(DDL)
+        con.execute(ddl)
         con.executemany(
-            f"INSERT INTO clasificacion VALUES ({', '.join('?' * len(COLUMNAS))})",
-            filas,
+            f"INSERT INTO {tabla} VALUES ({', '.join('?' * len(columnas))})", filas
         )
         con.execute(
-            f"COPY clasificacion TO '{destino.as_posix()}' "
+            f"COPY {tabla} TO '{destino.as_posix()}' "
             f"(FORMAT PARQUET, COMPRESSION ZSTD)"
         )
     finally:
         con.close()
     return destino
+
+
+def escribir_parquet(filas: list[tuple], destino: Path) -> Path:
+    """Escribe la clasificacion como Parquet. Devuelve el path escrito."""
+    return _escribir(DDL, "clasificacion", COLUMNAS, filas, destino)
+
+
+def escribir_comercios_parquet(filas: list[tuple], destino: Path) -> Path:
+    return _escribir(
+        DDL_COMERCIOS, "comercios_excluidos", COLUMNAS_COMERCIOS, filas, destino
+    )
 
 
 def resumen(filas: list[tuple]) -> dict[str, int]:

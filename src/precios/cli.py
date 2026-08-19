@@ -387,6 +387,7 @@ def comando_publicar_clasificacion(args: argparse.Namespace, cfg: Config) -> int
     """
     from .classify import publicar as pub_mod
     from .classify.taxonomia import Taxonomia
+    from .comercios import ListaComercios
     from .normalize.gcs import ClienteBucket
 
     taxonomia = Taxonomia.desde_yaml(cfg.path_categorias)
@@ -394,22 +395,38 @@ def comando_publicar_clasificacion(args: argparse.Namespace, cfg: Config) -> int
     res = pub_mod.resumen(filas)
     log(logging.INFO, "clasificacion construida", **res)
 
+    comercios = ListaComercios.desde_yaml(cfg.path_comercios)
+    filas_com = pub_mod.filas_comercios_excluidos(comercios)
+    log(logging.INFO, "comercios excluidos", cantidad=len(filas_com))
+
+    # Un directorio por tabla: `subir_directorio` sube todos los .parquet que
+    # encuentra, y el consumidor lee cada prefijo entero. Dos esquemas en la
+    # misma carpeta lo romperian.
     tmp = Path(tempfile.mkdtemp(prefix="clasif_", dir=cfg.tmpdir))
     try:
-        destino = pub_mod.escribir_parquet(filas, tmp / pub_mod.NOMBRE_ARCHIVO)
+        dir_clasif = tmp / "clasificacion"
+        dir_com = tmp / "comercios_excluidos"
+        destino = pub_mod.escribir_parquet(filas, dir_clasif / pub_mod.NOMBRE_ARCHIVO)
+        destino_com = pub_mod.escribir_comercios_parquet(
+            filas_com, dir_com / pub_mod.NOMBRE_ARCHIVO_COMERCIOS
+        )
 
         if args.salida_local:
             local = Path(args.salida_local)
             local.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(destino, local / pub_mod.NOMBRE_ARCHIVO)
-            log(logging.INFO, "escrito local", path=str(local / pub_mod.NOMBRE_ARCHIVO))
+            for origen in (destino, destino_com):
+                shutil.copy2(origen, local / origen.name)
+            log(logging.INFO, "escrito local", path=str(local))
 
-        prefijo = f"{cfg.prefijo_staged}/clasificacion"
         if args.dry_run:
-            log(logging.INFO, "[dry-run] no se sube nada", prefijo=prefijo)
+            log(logging.INFO, "[dry-run] no se sube nada")
         else:
-            n = ClienteBucket(cfg).subir_directorio(tmp, prefijo)
-            log(logging.INFO, "clasificacion publicada", prefijo=prefijo, archivos=n)
+            cliente = ClienteBucket(cfg)
+            for tabla, origen in (("clasificacion", dir_clasif),
+                                  ("comercios_excluidos", dir_com)):
+                prefijo = f"{cfg.prefijo_staged}/{tabla}"
+                n = cliente.subir_directorio(origen, prefijo)
+                log(logging.INFO, "tabla publicada", prefijo=prefijo, archivos=n)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -422,6 +439,7 @@ def comando_publicar_clasificacion(args: argparse.Namespace, cfg: Config) -> int
     print(f"  categorias           {res['categorias']:>12,}")
     print(f"  clases COICOP        {res['clases']:>12,}")
     print(f"  revisados a mano     {res['revisados']:>12,}")
+    print(f"  comercios excluidos  {len(filas_com):>12,}")
     print("=" * ancho, flush=True)
 
     if res["revisados"] == 0:

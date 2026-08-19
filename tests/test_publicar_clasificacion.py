@@ -94,6 +94,26 @@ def test_el_parquet_publicado_se_puede_leer_y_joinear(tmp_path, tax):
     assert leido == [("7790001", "01.1.1"), ("7790002", "01.1.4")]
 
 
+def test_los_comercios_excluidos_se_publican_con_el_motivo(tmp_path):
+    """Dentro de un año nadie se acuerda de por que el comercio 23 no esta."""
+    from precios.comercios import ListaComercios
+
+    lista = ListaComercios.desde_yaml(RAIZ / "config" / "comercios.yaml")
+    filas = pub.filas_comercios_excluidos(lista)
+
+    assert {f[0] for f in filas} == set(lista.ids)
+    assert all(f[1] for f in filas), "todos tienen nombre"
+    assert all(f[2] for f in filas), "todos tienen motivo"
+
+    destino = pub.escribir_comercios_parquet(filas, tmp_path / "com.parquet")
+    con = duckdb.connect()
+    leido = con.execute(
+        f"SELECT id_comercio FROM read_parquet('{destino.as_posix()}') ORDER BY 1"
+    ).fetchall()
+    con.close()
+    assert [r[0] for r in leido] == sorted(lista.ids)
+
+
 def test_el_mapeo_real_del_repo_es_publicable(tax):
     """El CSV versionado tiene que pasar todas las validaciones de arriba."""
     filas = pub.filas_clasificacion(RAIZ / "config" / "mapeo_productos.csv", tax)
