@@ -375,6 +375,63 @@ def comando_quotes(args: argparse.Namespace, cfg: Config) -> int:
     return 0
 
 
+def comando_publicar_clasificacion(args: argparse.Namespace, cfg: Config) -> int:
+    """Etapa 4.2: publica el mapeo producto -> categoria al bucket.
+
+    Sin esto el repo de reporte tiene precios sueltos y ninguna forma de
+    agruparlos: Jevons se calcula dentro de cada categoria elemental. Es la
+    unica pieza de la interfaz que faltaba en el bucket.
+
+    Se sube a `staged/clasificacion/`, que no tiene regla de lifecycle y por lo
+    tanto se conserva para siempre, igual que quotes_mensuales.
+    """
+    from .classify import publicar as pub_mod
+    from .classify.taxonomia import Taxonomia
+    from .normalize.gcs import ClienteBucket
+
+    taxonomia = Taxonomia.desde_yaml(cfg.path_categorias)
+    filas = pub_mod.filas_clasificacion(cfg.path_mapeo, taxonomia)
+    res = pub_mod.resumen(filas)
+    log(logging.INFO, "clasificacion construida", **res)
+
+    tmp = Path(tempfile.mkdtemp(prefix="clasif_", dir=cfg.tmpdir))
+    try:
+        destino = pub_mod.escribir_parquet(filas, tmp / pub_mod.NOMBRE_ARCHIVO)
+
+        if args.salida_local:
+            local = Path(args.salida_local)
+            local.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(destino, local / pub_mod.NOMBRE_ARCHIVO)
+            log(logging.INFO, "escrito local", path=str(local / pub_mod.NOMBRE_ARCHIVO))
+
+        prefijo = f"{cfg.prefijo_staged}/clasificacion"
+        if args.dry_run:
+            log(logging.INFO, "[dry-run] no se sube nada", prefijo=prefijo)
+        else:
+            n = ClienteBucket(cfg).subir_directorio(tmp, prefijo)
+            log(logging.INFO, "clasificacion publicada", prefijo=prefijo, archivos=n)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    ancho = 78
+    print("", flush=True)
+    print("=" * ancho)
+    print("CLASIFICACION PUBLICADA" + ("  [DRY-RUN]" if args.dry_run else ""))
+    print("=" * ancho)
+    print(f"  productos            {res['productos']:>12,}")
+    print(f"  categorias           {res['categorias']:>12,}")
+    print(f"  clases COICOP        {res['clases']:>12,}")
+    print(f"  revisados a mano     {res['revisados']:>12,}")
+    print("=" * ancho, flush=True)
+
+    if res["revisados"] == 0:
+        log(logging.WARNING,
+            "ningun producto fue revisado a mano: la clasificacion es 100% automatica",
+            productos=res["productos"])
+    log(logging.INFO, "fin ok", exit_code=0)
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="precios", description="Pipeline de precios SEPA")
     sub = p.add_subparsers(dest="comando", required=True)
@@ -406,6 +463,14 @@ def main(argv=None) -> int:
     q.add_argument("--dry-run", action="store_true",
                    help="colapsa pero no sube nada a GCS")
 
+    pc = sub.add_parser(
+        "publicar-clasificacion",
+        help="Etapa 4.2: publica producto -> categoria al bucket (lo lee el repo de reporte)")
+    pc.add_argument("--salida-local",
+                    help="ademas de subir, deja una copia del Parquet en este directorio")
+    pc.add_argument("--dry-run", action="store_true",
+                    help="construye la tabla pero no sube nada a GCS")
+
     args = p.parse_args(argv)
     cfg = Config.desde_entorno()
     configurar(cfg.log_nivel, cfg.log_formato)
@@ -414,6 +479,8 @@ def main(argv=None) -> int:
         return comando_etl(args, cfg)
     if args.comando == "quotes":
         return comando_quotes(args, cfg)
+    if args.comando == "publicar-clasificacion":
+        return comando_publicar_clasificacion(args, cfg)
     if args.comando == "clasificar":
         if not args.fecha and not args.origen_local:
             p.error("clasificar necesita --fecha o --origen-local")
