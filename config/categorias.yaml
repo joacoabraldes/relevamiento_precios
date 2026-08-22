@@ -213,3 +213,114 @@ categorias:
     unidad_base: kg
     cantidad_min: 0.9
     cantidad_max: 1.1
+
+  # --------------------------------------------------- ampliacion cobertura --
+  # Estas 8 categorias se agregaron para cubrir mas gasto de cada clase. La
+  # prioridad salio de los ponderadores de la ENGHo 2017/18: el indice aplicaba
+  # el 100% del peso de cada clase midiendo una fraccion chica de sus articulos
+  # (3,7% en "Otros alimentos", 17,2% en "Pan y cereales").
+  #
+  # El % de cada una es su peso DENTRO de su clase, region GBA.
+
+  almacen.galletitas_dulces_envasadas:      # A0111105, 11,46% de 01.1.1
+    clase: "01.1.1"
+    nombre: Galletitas dulces envasadas
+    patrones: ['\bGALLETITAS?\b']
+    # Las galletitas de agua y las saladas son otro articulo de la ENGHo
+    # (A0111103), no este: por eso van excluidas y no en `alguno`.
+    alguno: ['\bDULCE\w*\b', 'RELLEN\w*', '\bOBLEA', 'CHOCOLAT', 'VAINILLA',
+             '\bCOCO\b', '\bLIMON\b', 'SURTID\w*', '\bFRUTILLA\b']
+    excluye: ['\bAGUA\b', 'SALAD\w*', 'CRACKER', '\bARROZ\b', 'GRISIN',
+              'TOSTAD\w*', '\bSALVADO\b', '\bPIZZA\b',
+              # Alimento para mascota: "SNACK PERROS PETS CLASS MIX SURTIDO"
+              # entraba por 'SURTID' + 'GALLETITA'.
+              '\bPERROS?\b', '\bGATOS?\b', 'MASCOTA', 'PETS CLASS',
+              'CANINO', 'FELINO']
+    unidad_base: kg
+    cantidad_min: 0.05
+    cantidad_max: 0.6
+
+  lacteos.queso_crema_untable:              # A0114201, 6,64% de 01.1.4
+    clase: "01.1.4"
+    nombre: Queso crema o untable
+    patrones: ['\bQUESO\b']
+    # \bCREMA\b con limite de palabra NO matchea CREMOSO, que es otro queso.
+    alguno: ['UNTAB\w*', '\bCREMA\b']
+    excluye: ['RALLAD\w*', 'PORT SALUT', 'CUARTIROLO', 'MUZZARELLA', 'MOZZARELLA',
+              '\bPIZZA\b', 'RAVIOL', '\bTAPA\b', 'SANDWICH', '\bCREMOSO\b',
+              'EMPANADA', '\bTARTA\b',
+              # Snacks saborizados: el queso es el sabor, no el producto.
+              '\bCHIPS\b', '\bSNACK', '\bPITA\b', 'PALITOS', 'GALLETIT\w*']
+    unidad_base: kg
+    cantidad_min: 0.1
+    cantidad_max: 0.4
+
+  lacteos.queso_rallado:                    # A0114209, 4,35% de 01.1.4
+    clase: "01.1.4"
+    nombre: Queso rallado
+    patrones: ['\bQUESO\b', 'RALLAD\w*']
+    excluye: ['\bPIZZA\b', 'RAVIOL', 'EMPANADA']
+    unidad_base: kg
+    cantidad_min: 0.04
+    cantidad_max: 0.25
+
+  lacteos.huevos_gallina:                   # A0114401, 10,65% de 01.1.4
+    clase: "01.1.4"
+    nombre: Huevos de gallina
+    patrones: ['\bHUEVOS?\b']
+    # "HUEVO" trae huevos de Pascua, flanes y fideos al huevo. La unidad `un` y
+    # el rango de 6 a 30 unidades hacen casi todo el filtro; las exclusiones
+    # cubren el resto.
+    excluye: ['CHOCOLAT', 'PASCUA', 'KINDER', 'SORPRESA', 'BON O BON', 'CADBURY',
+              '\bFLAN\b', 'FIDEO', '\bPASTA\b', 'TALLARIN', 'SPAGHET',
+              'TIRABUZ', '\bMOÑO\b', 'CODITO', '\bMASA\b', 'BIZCOCH',
+              '\bTORTA\b', 'MAYONESA']
+    unidad_base: un
+    cantidad_min: 6
+    cantidad_max: 30
+
+  lacteos.dulce_de_leche:                   # A0114304, 2,16% de 01.1.4
+    clase: "01.1.4"
+    nombre: Dulce de leche
+    patrones: ['DULCE DE LECHE']
+    excluye: ['ALFAJOR', 'GALLETIT', '\bOBLEA', '\bHELADO\b', '\bFLAN\b',
+              '\bTORTA\b', '\bTARTA\b', 'YOGUR', 'POSTRE', '\bBUDIN\b']
+    unidad_base: kg
+    cantidad_min: 0.2
+    cantidad_max: 0.6
+
+  almacen.mermelada:                        # A0118203, 6,74% de 01.1.8
+    clase: "01.1.8"
+    nombre: Mermeladas, dulces y jaleas
+    patrones: ['\bMERMELADA\b']
+    excluye: ['GALLETIT', '\bOBLEA', 'ALFAJOR', '\bTORTA\b', '\bTARTA\b',
+              '\bBUDIN\b', 'CEREAL']
+    unidad_base: kg
+    cantidad_min: 0.2
+    cantidad_max: 0.6
+
+  almacen.mayonesa:                         # A0119111, 11,30% de 01.1.9
+    clase: "01.1.9"
+    nombre: Mayonesa
+    patrones: ['\bMAYONESA\b']
+    excluye: ['ENSALADA', 'SANDWICH', '\bPACK\b.*SALSA']
+    unidad_base: kg
+    cantidad_min: 0.1
+    cantidad_max: 1.0
+
+  almacen.snacks:                           # A0119210, 17,68% de 01.1.9
+    clase: "01.1.9"
+    nombre: Snacks (papas fritas, chizitos, palitos)
+    patrones: ['.']
+    alguno: ['PAPAS FRITAS', 'CHIZIT\w*', '\bPALITOS\b', '\bSNACK', 'NACHOS',
+             '\bTOSTITOS\b', '\bDORITOS\b', '\bCONITOS\b', '\bPELUSAS\b']
+    # Las papas congeladas y las prefritas son otro articulo (comida preparada).
+    excluye: ['CONGELAD\w*', 'PREFRIT\w*', 'PRE FRIT', '\bBASTON\w*\b',
+              '\bNOISETTE\b', '\bPURE\b', '\bSALSA\b', 'HELADO',
+              # 'SNACKY' es marca de galletitas Terrabusi, no un snack salado.
+              'GALLETIT\w*', '\bOBLEA', 'CUBANITO',
+              '\bPERROS?\b', '\bGATOS?\b', 'MASCOTA', 'PETS CLASS',
+              'CANINO', 'FELINO']
+    unidad_base: kg
+    cantidad_min: 0.03
+    cantidad_max: 0.4

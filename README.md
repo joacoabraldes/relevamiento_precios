@@ -18,6 +18,38 @@ Precios Argentinos) para construir un índice de precios de supermercado.
 > **El índice necesita dos meses de datos acumulados** para producir la primera variación
 > mensual. La descarga arrancó el 2026-08-02.
 
+## El proyecto son dos repos
+
+Este repo **captura y procesa**. El cálculo del índice vive en un repo aparte:
+[`reporte_variaciones`](https://github.com/joacoabraldes/reporte_variaciones).
+
+```
+┌─────────────────────────────┐                      ┌──────────────────────────┐
+│   relevamiento_precios      │                      │   reporte_variaciones    │
+│   (este repo)               │                      │                          │
+│                             │   staged/            │                          │
+│   descarga → procesa →      │──▶ quotes_mensuales/ ──▶  Jevons (elemental)    │
+│   clasifica → colapsa       │    catalogo_productos/│   Laspeyres (agregado)   │
+│                             │                      │   encadenamiento         │
+│   escribe en el bucket      │                      │   solo LEE del bucket    │
+└─────────────────────────────┘                      └──────────────────────────┘
+```
+
+**La interfaz es el bucket, no el código.** El repo de reporte no importa nada de acá: lee
+dos tablas Parquet y calcula. No sabe qué es SEPA, ni que los CSV vienen con separador pipe,
+ni que hay 77 variantes de unidades de medida.
+
+**Por qué están separados:** un bug acá cuesta días de datos **perdidos para siempre**
+(SEPA no tiene histórico). Un bug allá cuesta un número mal, que se recalcula. Son riesgos
+de distinto orden y merecen ritmos de cambio distintos: esto tiene que ser aburrido y
+estable, aquello va a cambiar constantemente.
+
+| | Este repo | `reporte_variaciones` |
+|---|---|---|
+| Corre | automático, todos los días | a mano, explorando |
+| Permisos sobre el bucket | escritura | solo lectura |
+| Un bug cuesta | datos irrecuperables | un número recalculable |
+
 ## Estructura
 
 ```
@@ -303,6 +335,57 @@ SEPA_LOG_FORMATO=texto python sepa_downloader.py
 | `SEPA_FECHA_ESTRICTA` | `0` | Con `1`, si `fecha_datos` no se puede sacar del ZIP no sube nada para ese día y lo marca como falla. |
 | `SEPA_LOG_NIVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `SEPA_LOG_FORMATO` | `json` | `json` (structured logging a stdout) o `texto` (legible). |
+
+---
+
+## Opción en uso: Programador de tareas de Windows
+
+Es la que está andando hoy, en la máquina local.
+
+| | |
+|---|---|
+| Tarea | `SEPA descarga diaria` |
+| Horario | todos los días a las **09:00 ART** |
+| Qué corre | [`correr_diario.cmd`](correr_diario.cmd) — descarga **y** procesamiento |
+| Si la máquina estaba apagada | corre en cuanto se prende (`StartWhenAvailable`) |
+| Con batería | sí, no requiere estar enchufada |
+| Si falla | reintenta 3 veces cada 30 minutos |
+| Logs | `logs/YYYY-MM-DD.log`, se conservan 30 días |
+
+Registrarla (o volver a registrarla tras un cambio):
+
+```powershell
+$xml = Get-Content .\tarea_programada.xml -Raw -Encoding Unicode
+Register-ScheduledTask -TaskName "SEPA descarga diaria" -Xml $xml -Force
+```
+
+Ver estado, correrla a mano, o desactivarla:
+
+```powershell
+Get-ScheduledTaskInfo -TaskName "SEPA descarga diaria"
+Start-ScheduledTask   -TaskName "SEPA descarga diaria"
+Disable-ScheduledTask -TaskName "SEPA descarga diaria"
+```
+
+**Por qué a las 09:00 y no más tarde.** SEPA publica el archivo del día alrededor de las
+13:18 ART, así que a las 9 de la mañana el archivo de hoy todavía es el de la semana pasada:
+cada día se levanta al día siguiente. No se pierde nada —quedan 6 días de margen dentro de
+la ventana de 7— pero el dato más fresco siempre va a estar un día atrasado. Si eso llegara
+a molestar, mover el `<StartBoundary>` del XML a las 17:00.
+
+**Códigos de salida de `correr_diario.cmd`:**
+
+| | |
+|---|---|
+| `0` | todo bien |
+| `1` | **falló la descarga** — urgente, quedan menos de 7 días para recuperar |
+| `2` | falló el procesamiento — el crudo está a salvo, se puede reprocesar |
+
+El código 2 del ETL (un comercio que no publicó) no se propaga como falla: pasa todos los
+días y no es un problema del pipeline.
+
+**Lo que la tarea NO hace:** recalcular los quotes mensuales. Eso se corre cuando se cierra
+un mes: `python -m precios.cli quotes --anio 2026 --mes 8`.
 
 ---
 
