@@ -361,3 +361,83 @@ def test_sin_archivo_de_exclusiones_no_filtra_nada(tmp_path):
     lista = ListaComercios.desde_yaml(tmp_path / "no-existe.yaml")
     assert len(lista) == 0
     assert lista.filtro_sql() == "TRUE"
+
+
+# --------------------------------------------------------------------------- #
+# El mapeo versionado conserva la revision humana
+# --------------------------------------------------------------------------- #
+
+
+def _propuesta(id_producto, categoria, n_obs=100):
+    from precios.classify.proponer import ASIGNADA, Propuesta
+
+    return Propuesta(
+        id_producto=id_producto, categoria=categoria, estado=ASIGNADA,
+        descripcion="ALGO", marca="M", cantidad_base=1.0, unidad_base="kg",
+        n_obs=n_obs, n_comercios=3,
+    )
+
+
+def _leer(path):
+    import csv
+
+    with path.open(encoding="utf-8", newline="") as fh:
+        return {f["id_producto"]: f for f in csv.DictReader(fh)}
+
+
+def test_una_revision_a_mano_sobrevive_a_regenerar_el_mapeo(tmp_path):
+    """EL bug: `clasificar` reescribia 'auto'/'no' en TODAS las filas.
+
+    Con eso, sentarse a revisar productos era trabajo que se borraba solo la
+    proxima vez que alguien corriera el comando.
+    """
+    from precios.classify.proponer import escribir_mapeo
+
+    destino = tmp_path / "mapeo.csv"
+    escribir_mapeo([_propuesta("111", "almacen.sal_fina_500g")], destino)
+    assert _leer(destino)["111"]["revisado"] == "no"
+
+    # Alguien lo revisa y ademas lo recategoriza.
+    filas = destino.read_text(encoding="utf-8").replace(
+        "almacen.sal_fina_500g,ALGO,M,1,kg,100,auto,no",
+        "almacen.azucar_comun_1kg,ALGO,M,1,kg,100,manual,si",
+    )
+    destino.write_text(filas, encoding="utf-8")
+
+    # La regla sigue proponiendo la categoria vieja: no puede ganarle a la persona.
+    n, conservadas = escribir_mapeo(
+        [_propuesta("111", "almacen.sal_fina_500g")], destino
+    )
+    fila = _leer(destino)["111"]
+    assert fila["revisado"] == "si"
+    assert fila["origen"] == "manual"
+    assert fila["categoria"] == "almacen.azucar_comun_1kg"
+    assert conservadas == 1
+
+
+def test_un_producto_revisado_que_desaparece_del_catalogo_se_conserva(tmp_path):
+    """Su EAN puede volver el mes que viene: no se pide revisarlo dos veces."""
+    from precios.classify.proponer import escribir_mapeo
+
+    destino = tmp_path / "mapeo.csv"
+    escribir_mapeo([_propuesta("111", "almacen.sal_fina_500g")], destino)
+    destino.write_text(
+        destino.read_text(encoding="utf-8").replace(",auto,no", ",manual,si"),
+        encoding="utf-8",
+    )
+
+    n, conservadas = escribir_mapeo([_propuesta("222", "almacen.azucar_comun_1kg")], destino)
+    leido = _leer(destino)
+    assert set(leido) == {"111", "222"}
+    assert leido["111"]["revisado"] == "si"
+    assert leido["222"]["revisado"] == "no"
+
+
+def test_un_producto_sin_revisar_si_se_pisa_con_la_propuesta_nueva(tmp_path):
+    """Lo que nadie miro se regenera: la regla manda mientras no haya decision."""
+    from precios.classify.proponer import escribir_mapeo
+
+    destino = tmp_path / "mapeo.csv"
+    escribir_mapeo([_propuesta("111", "almacen.sal_fina_500g")], destino)
+    escribir_mapeo([_propuesta("111", "almacen.azucar_comun_1kg")], destino)
+    assert _leer(destino)["111"]["categoria"] == "almacen.azucar_comun_1kg"

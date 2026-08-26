@@ -202,17 +202,35 @@ def comando_clasificar(args: argparse.Namespace, cfg: Config) -> int:
             from .normalize.gcs import ClienteBucket
 
             cliente = ClienteBucket(cfg)
-            fecha = date.fromisoformat(args.fecha)
-            prefijo = cfg.particion("observaciones", fecha)
-            nombres = [n for n in cliente.listar(prefijo) if n.endswith(".parquet")]
+            # El catalogo se arma sobre un RANGO, no sobre un dia. Con un solo
+            # dia, un producto que no estaba en gondola esa fecha se cae del
+            # mapeo y sus quotes salen del indice: el universo de lo que se mide
+            # fluctuaba con el stock de un dia puntual.
+            if args.desde or args.hasta:
+                d0 = date.fromisoformat(args.desde) if args.desde else date.fromisoformat(args.hasta)
+                d1 = date.fromisoformat(args.hasta) if args.hasta else date.fromisoformat(args.desde)
+            else:
+                d0 = d1 = date.fromisoformat(args.fecha)
+            if d1 < d0:
+                d0, d1 = d1, d0
+
+            fechas = _rango(d0, d1)
+            nombres: list[str] = []
+            for f in fechas:
+                prefijo = cfg.particion("observaciones", f)
+                nombres += [n for n in cliente.listar(prefijo) if n.endswith(".parquet")]
             if not nombres:
-                log(logging.CRITICAL, "no hay datos procesados para esa fecha",
-                    fecha=args.fecha, prefijo=prefijo)
+                log(logging.CRITICAL, "no hay datos procesados en ese rango",
+                    desde=str(d0), hasta=str(d1))
                 return 1
             tmp = Path(tempfile.mkdtemp(prefix="sepa_clas_", dir=cfg.tmpdir))
-            log(logging.INFO, "bajando particion", fecha=args.fecha, archivos=len(nombres))
+            log(logging.INFO, "bajando particiones", desde=str(d0), hasta=str(d1),
+                dias=len(fechas), archivos=len(nombres))
             for n in nombres:
-                cliente.bajar(n, tmp / Path(n).name)
+                # Los nombres se repiten entre dias: el prefijo evita pisarlos.
+                fecha_dia = next((x for x in n.split("/") if x.startswith("dia=")), "")
+                mes_dia = next((x for x in n.split("/") if x.startswith("mes=")), "")
+                cliente.bajar(n, tmp / f"{mes_dia}_{fecha_dia}_{Path(n).name}")
             glob = f"{tmp.as_posix()}/*.parquet"
 
         catalogo = prop_mod.construir_catalogo(glob, cfg.memoria_duckdb, comercios)
@@ -222,7 +240,7 @@ def comando_clasificar(args: argparse.Namespace, cfg: Config) -> int:
         prop_mod.log_resumen(resumen, taxonomia)
 
         dir_salida = Path(args.salida)
-        n_mapeo = prop_mod.escribir_mapeo(propuestas, cfg.path_mapeo)
+        n_mapeo, n_conservadas = prop_mod.escribir_mapeo(propuestas, cfg.path_mapeo)
         n_rev = prop_mod.escribir_revision(propuestas, dir_salida / "revisar_ambiguos.csv")
         n_sin = prop_mod.escribir_sin_clasificar(
             catalogo, propuestas, dir_salida / "sin_clasificar_top.csv"
@@ -254,7 +272,8 @@ def comando_clasificar(args: argparse.Namespace, cfg: Config) -> int:
     print(f"ambiguos (reglas que se pisan):     {resumen.ambiguos_entre_categorias:,}")
     print(f"ambiguos (cadenas que discrepan):   {resumen.ambiguos_entre_variantes:,}")
     print("")
-    print(f"mapeo versionable  -> {cfg.path_mapeo}  ({n_mapeo:,} filas)")
+    print(f"mapeo versionable  -> {cfg.path_mapeo}  ({n_mapeo:,} filas, "
+          f"{n_conservadas:,} revisadas a mano conservadas)")
     print(f"para revisar       -> {dir_salida / 'revisar_ambiguos.csv'}  ({n_rev:,} filas)")
     print(f"sin clasificar     -> {dir_salida / 'sin_clasificar_top.csv'}  ({n_sin:,} productos)")
     print("=" * ancho, flush=True)
@@ -466,7 +485,9 @@ def main(argv=None) -> int:
 
     c = sub.add_parser("clasificar",
                        help="Etapa 3: propone producto -> categoria para revision")
-    c.add_argument("--fecha", help="fecha procesada a usar como base (YYYY-MM-DD)")
+    c.add_argument("--fecha", help="un solo dia procesado (YYYY-MM-DD)")
+    c.add_argument("--desde", help="inicio del rango de dias del catalogo (YYYY-MM-DD)")
+    c.add_argument("--hasta", help="fin del rango de dias del catalogo (YYYY-MM-DD)")
     c.add_argument("--origen-local", help="directorio local con los Parquet, en vez de GCS")
     c.add_argument("--salida", default="salida",
                    help="directorio para los reportes de revision (default: salida/)")
@@ -500,8 +521,8 @@ def main(argv=None) -> int:
     if args.comando == "publicar-clasificacion":
         return comando_publicar_clasificacion(args, cfg)
     if args.comando == "clasificar":
-        if not args.fecha and not args.origen_local:
-            p.error("clasificar necesita --fecha o --origen-local")
+        if not (args.fecha or args.desde or args.hasta or args.origen_local):
+            p.error("clasificar necesita --fecha, --desde/--hasta o --origen-local")
         return comando_clasificar(args, cfg)
     return 2
 

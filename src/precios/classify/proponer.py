@@ -192,26 +192,83 @@ CAMPOS_MAPEO = (
 )
 
 
-def escribir_mapeo(propuestas: list[Propuesta], destino: Path) -> int:
-    """Escribe el mapeo versionable, solo con las asignaciones firmes.
+# Un producto revisado a mano tiene estas dos marcas. `origen=manual` significa
+# que alguien miro la descripcion y decidio; `revisado=si` que la decision esta
+# confirmada. Las dos sobreviven a una regeneracion del mapeo.
+ORIGEN_AUTO = "auto"
+ORIGEN_MANUAL = "manual"
 
-    `revisado=no` marca que todavia nadie lo miro. La idea es que se vaya
-    pasando a `si` a medida que se revisa, y que un cambio de categoria quede
-    registrado en el diff.
+
+def _revisados_previos(destino: Path) -> dict[str, dict]:
+    """Filas ya revisadas a mano en el mapeo que hay hoy.
+
+    Sin esto, cada corrida de `clasificar` pisaria el trabajo de revision: la
+    version anterior escribia `auto`/`no` en todas las filas, siempre.
+    """
+    if not destino.is_file():
+        return {}
+    previos: dict[str, dict] = {}
+    with destino.open(encoding="utf-8", newline="") as fh:
+        for fila in csv.DictReader(fh):
+            if (fila.get("revisado") or "").strip().lower() in ("si", "sí"):
+                previos[(fila.get("id_producto") or "").strip()] = fila
+    return previos
+
+
+def escribir_mapeo(propuestas: list[Propuesta], destino: Path) -> tuple[int, int]:
+    """Escribe el mapeo versionable. Devuelve (filas, revisadas conservadas).
+
+    `revisado=no` marca que todavia nadie lo miro. Se pasa a `si` a mano, y un
+    cambio de categoria queda registrado en el diff.
+
+    **La revision humana gana sobre la regla.** Si un producto ya figura con
+    `revisado=si`, se conserva su categoria tal cual, aunque los patrones de
+    `categorias.yaml` ahora propongan otra. Un regex que cambia no puede
+    deshacer una decision que alguien tomo mirando el producto; si de verdad
+    hace falta recategorizarlo, se edita la fila y se ve en el diff.
+
+    Un producto revisado que ya no aparece en el catalogo se conserva igual: su
+    EAN puede volver el mes que viene y seria absurdo pedir que se revise dos
+    veces.
     """
     destino.parent.mkdir(parents=True, exist_ok=True)
+    previos = _revisados_previos(destino)
+
     firmes = [p for p in propuestas if p.estado == ASIGNADA]
-    firmes.sort(key=lambda p: (p.categoria or "", -p.n_obs))
+    filas: list[list] = []
+    vistos: set[str] = set()
+
+    for p in firmes:
+        vistos.add(p.id_producto)
+        anterior = previos.get(p.id_producto)
+        if anterior:
+            # Revisado: mandan la categoria y las marcas que quedaron guardadas.
+            filas.append([
+                p.id_producto, anterior.get("categoria") or p.categoria,
+                p.descripcion, p.marca or "",
+                "" if p.cantidad_base is None else f"{p.cantidad_base:g}",
+                p.unidad_base or "", p.n_obs,
+                anterior.get("origen") or ORIGEN_MANUAL, "si",
+            ])
+        else:
+            filas.append([
+                p.id_producto, p.categoria, p.descripcion, p.marca or "",
+                "" if p.cantidad_base is None else f"{p.cantidad_base:g}",
+                p.unidad_base or "", p.n_obs, ORIGEN_AUTO, "no",
+            ])
+
+    # Revisados que no volvieron a proponerse: se conservan tal cual estaban.
+    for id_producto, anterior in previos.items():
+        if id_producto in vistos:
+            continue
+        filas.append([anterior.get(c, "") for c in CAMPOS_MAPEO])
+
+    filas.sort(key=lambda f: (str(f[1] or ""), -int(f[6] or 0)))
     with destino.open("w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
         w.writerow(CAMPOS_MAPEO)
-        for p in firmes:
-            w.writerow([
-                p.id_producto, p.categoria, p.descripcion, p.marca or "",
-                "" if p.cantidad_base is None else f"{p.cantidad_base:g}",
-                p.unidad_base or "", p.n_obs, "auto", "no",
-            ])
-    return len(firmes)
+        w.writerows(filas)
+    return len(filas), len(previos)
 
 
 def escribir_revision(propuestas: list[Propuesta], destino: Path) -> int:
