@@ -370,3 +370,103 @@ def test_reprocesar_es_idempotente(tmp_path, cfg, unidades, provincias):
     assert r1.observaciones == r2.observaciones
     assert archivos1 == archivos2, "la particion acumulo archivos en vez de reescribirse"
     assert df1.equals(df2)
+
+
+# --------------------------------------------------------------------------- #
+# Dimensiones de sucursal y comercio
+#
+# Todo esto ya venia en los CSV de SEPA y se tiraba. El nombre de bandera existe
+# para que los reportes no muestren "comercio 20"; el codigo postal y las
+# coordenadas, para poder separar GBA de Pampeana, que pesan 78,9% del IPC y hoy
+# van juntas.
+# --------------------------------------------------------------------------- #
+
+
+def test_el_nombre_de_bandera_llega_a_la_observacion(tmp_path, cfg, unidades, provincias):
+    """SEPA numera informantes; nadie sabe que es el "comercio 21"."""
+    _, obs, _ = correr(
+        tmp_path, cfg, unidades, provincias,
+        {"sepa_1_comercio-sepa-21_x.zip": armar_zip_comercio(
+            armar_csv(CABECERA_PRODUCTOS, [prod()]),
+            armar_csv(CABECERA_SUCURSALES, [suc()]),
+            armar_csv(CABECERA_COMERCIO, [com()]))},
+    )
+    assert obs["comercio_nombre"].tolist() == ["El Super"]
+    assert obs["comercio_razon_social"].tolist() == ["Super SRL"]
+
+
+def test_cada_bandera_lleva_su_propio_nombre(tmp_path, cfg, unidades, provincias):
+    """Una empresa opera varios formatos: Cencosud es Vea, Disco y Jumbo.
+
+    El nombre se resuelve por (id_comercio, id_bandera), no por comercio, o
+    todas las sucursales de Cencosud dirian lo mismo.
+    """
+    filas_com = [
+        "9|1|30123456787|Cencosud S.A.|Vea|http://x.ar|2026-08-01T02:00:00-03:00|1.0",
+        "9|2|30123456787|Cencosud S.A.|Jumbo|http://x.ar|2026-08-01T02:00:00-03:00|1.0",
+    ]
+    productos = [
+        prod(id_comercio="9", bandera="1", sucursal="1"),
+        prod(id_comercio="9", bandera="2", sucursal="2"),
+    ]
+    sucursales = [
+        suc(id_comercio="9", bandera="1", sucursal="1"),
+        suc(id_comercio="9", bandera="2", sucursal="2"),
+    ]
+    _, obs, _ = correr(
+        tmp_path, cfg, unidades, provincias,
+        {"sepa_1_comercio-sepa-9_x.zip": armar_zip_comercio(
+            armar_csv(CABECERA_PRODUCTOS, productos),
+            armar_csv(CABECERA_SUCURSALES, sucursales),
+            armar_csv(CABECERA_COMERCIO, filas_com))},
+    )
+    por_bandera = dict(zip(obs["id_bandera"], obs["comercio_nombre"]))
+    assert por_bandera == {"1": "Vea", "2": "Jumbo"}
+
+
+def test_localidad_codigo_postal_y_coordenadas_llegan(tmp_path, cfg, unidades, provincias):
+    _, obs, _ = correr(
+        tmp_path, cfg, unidades, provincias,
+        {"sepa_1_comercio-sepa-21_x.zip": armar_zip_comercio(
+            armar_csv(CABECERA_PRODUCTOS, [prod()]),
+            armar_csv(CABECERA_SUCURSALES, [suc()]),
+            armar_csv(CABECERA_COMERCIO, [com()]))},
+    )
+    assert obs["localidad"].tolist() == ["CABA"]
+    assert obs["codigo_postal"].tolist() == ["1043"]
+    assert obs["latitud"].tolist() == [-34.6]
+    assert obs["longitud"].tolist() == [-58.4]
+
+
+def test_sin_comercio_csv_el_dia_se_procesa_igual(tmp_path, cfg, unidades, provincias):
+    """Un ZIP incompleto no puede tumbar el dia: pasa todos los dias.
+
+    Se pierde el nombre, no la observacion. El precio es el dato irrecuperable.
+    """
+    _, obs, _ = correr(
+        tmp_path, cfg, unidades, provincias,
+        {"sepa_1_comercio-sepa-21_x.zip": armar_zip_comercio(
+            armar_csv(CABECERA_PRODUCTOS, [prod()]),
+            armar_csv(CABECERA_SUCURSALES, [suc()]),
+            None)},
+    )
+    assert obs is not None and len(obs) == 1
+    assert obs["comercio_nombre"].isna().all()
+    assert obs["precio_lista"].tolist() == [1500.0]
+
+
+def test_una_coordenada_ilegible_no_rompe_la_observacion(tmp_path, cfg, unidades, provincias):
+    """TRY_CAST: una latitud basura deja NULL y sigue, no aborta el comercio."""
+    rota = (f"21|1|7|Suc Centro|Supermercado|Corrientes|1234|N/D|-58.4|||1043|"
+            f"CABA|AR-C|08:00 a 21:00|08:00 a 21:00|08:00 a 21:00|08:00 a 21:00|"
+            f"08:00 a 21:00|09:00 a 20:00|cerrado")
+    _, obs, _ = correr(
+        tmp_path, cfg, unidades, provincias,
+        {"sepa_1_comercio-sepa-21_x.zip": armar_zip_comercio(
+            armar_csv(CABECERA_PRODUCTOS, [prod()]),
+            armar_csv(CABECERA_SUCURSALES, [rota]),
+            armar_csv(CABECERA_COMERCIO, [com()]))},
+    )
+    assert len(obs) == 1
+    assert obs["latitud"].isna().all()
+    assert obs["longitud"].tolist() == [-58.4]

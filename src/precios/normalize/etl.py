@@ -45,6 +45,25 @@ COLUMNAS_PRODUCTOS = (
     "productos_leyenda_promo2",
 )
 
+# Columnas de comercio.csv, verificadas abriendo un ZIP crudo del bucket.
+# Trae dos nombres y no son intercambiables: `comercio_razon_social` es la razon
+# social ("PAN AMERICAN ENERGY SL SUCURSAL ARGENTINA") y `comercio_bandera_nombre`
+# es la marca de gondola ("Axion Energy"). Para un reporte sirve la segunda.
+#
+# La clave es (id_comercio, id_bandera), no id_comercio: una empresa opera varias
+# banderas y son formatos distintos, con precios distintos. Cencosud es Vea, Disco
+# y Jumbo; INC S.A. es Carrefour, Market y Express.
+COLUMNAS_COMERCIO = (
+    "id_comercio",
+    "id_bandera",
+    "comercio_cuit",
+    "comercio_razon_social",
+    "comercio_bandera_nombre",
+    "comercio_bandera_url",
+    "comercio_ultima_actualizacion",
+    "comercio_version_sepa",
+)
+
 # Columnas de sucursales.csv. Solo usamos provincia/localidad/tipo, pero hay que
 # declararlas todas para que el parseo posicional sea estricto.
 COLUMNAS_SUCURSALES = (
@@ -289,6 +308,9 @@ def _procesar_comercio(
                        limpiar(id_sucursal) AS id_sucursal,
                        upper(limpiar(sucursales_provincia)) AS provincia_iso,
                        limpiar(sucursales_localidad) AS localidad,
+                       limpiar(sucursales_codigo_postal) AS codigo_postal,
+                       TRY_CAST(limpiar(sucursales_latitud) AS DOUBLE) AS latitud,
+                       TRY_CAST(limpiar(sucursales_longitud) AS DOUBLE) AS longitud,
                        limpiar(sucursales_tipo) AS sucursal_tipo
                 FROM {_leer_csv(paquete.path('sucursales.csv'), COLUMNAS_SUCURSALES)}
                 WHERE id_sucursal IS NOT NULL"""
@@ -298,7 +320,29 @@ def _procesar_comercio(
             "CREATE OR REPLACE TEMP TABLE suc AS "
             "SELECT NULL::VARCHAR AS id_comercio, NULL::VARCHAR AS id_sucursal, "
             "NULL::VARCHAR AS provincia_iso, NULL::VARCHAR AS localidad, "
+            "NULL::VARCHAR AS codigo_postal, NULL::DOUBLE AS latitud, "
+            "NULL::DOUBLE AS longitud, "
             "NULL::VARCHAR AS sucursal_tipo WHERE false"
+        )
+
+    # Nombre de la bandera, para no exponer el id de SEPA en los reportes.
+    if paquete.tiene("comercio.csv"):
+        con.execute(
+            f"""CREATE OR REPLACE TEMP TABLE com AS
+                SELECT limpiar(id_comercio) AS id_comercio,
+                       limpiar(id_bandera)  AS id_bandera,
+                       limpiar(comercio_razon_social)   AS razon_social,
+                       limpiar(comercio_bandera_nombre) AS bandera_nombre
+                FROM {_leer_csv(paquete.path('comercio.csv'), COLUMNAS_COMERCIO)}
+                WHERE id_comercio IS NOT NULL
+                  AND lower(coalesce(id_comercio, '')) NOT LIKE '{PATRON_PIE}'"""
+        )
+    else:
+        con.execute(
+            "CREATE OR REPLACE TEMP TABLE com AS "
+            "SELECT NULL::VARCHAR AS id_comercio, NULL::VARCHAR AS id_bandera, "
+            "NULL::VARCHAR AS razon_social, NULL::VARCHAR AS bandera_nombre "
+            "WHERE false"
         )
 
     # Observaciones validas, deduplicadas por (fecha, comercio, sucursal, producto).
@@ -308,8 +352,14 @@ def _procesar_comercio(
         SELECT
             DATE '{fecha.isoformat()}'                       AS fecha,
             c.id_comercio, c.id_bandera, c.id_sucursal,
+            m.bandera_nombre                                  AS comercio_nombre,
+            m.razon_social                                    AS comercio_razon_social,
             coalesce(p.provincia, '{PROVINCIA_DESCONOCIDA}')  AS provincia,
             s.provincia_iso,
+            s.localidad,
+            s.codigo_postal,
+            s.latitud,
+            s.longitud,
             c.id_producto, c.es_ean, c.descripcion, c.marca,
             c.cantidad_presentacion,
             u.canonica                                        AS unidad_presentacion,
@@ -324,6 +374,9 @@ def _procesar_comercio(
         LEFT JOIN suc s
                ON s.id_sucursal = c.id_sucursal
               AND (s.id_comercio = c.id_comercio OR s.id_comercio IS NULL)
+        LEFT JOIN com m
+               ON m.id_comercio = c.id_comercio
+              AND m.id_bandera  = c.id_bandera
         LEFT JOIN dim_provincias p ON p.codigo = s.provincia_iso
         LEFT JOIN dim_unidades   u ON u.codigo = c.unidad_clave
         WHERE c.motivo_rechazo IS NULL
